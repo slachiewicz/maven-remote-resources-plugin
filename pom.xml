@@ -26,7 +26,7 @@ under the License.
     <groupId>org.apache.maven.plugins</groupId>
     <artifactId>maven-plugins</artifactId>
     <version>33</version>
-    <relativePath />
+    <relativePath/>
   </parent>
 
   <artifactId>maven-remote-resources-plugin</artifactId>
@@ -68,7 +68,7 @@ under the License.
   </distributionManagement>
 
   <properties>
-    <mavenVersion>2.2.1</mavenVersion>
+    <mavenVersion>3.6.3</mavenVersion>
     <javaVersion>7</javaVersion>
     <mavenFilteringVersion>3.1.1</mavenFilteringVersion>
     <sitePluginVersion>3.3</sitePluginVersion>
