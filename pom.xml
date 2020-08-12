@@ -70,7 +70,7 @@ under the License.
   <properties>
     <mavenVersion>2.2.1</mavenVersion>
     <javaVersion>7</javaVersion>
-    <mavenFilteringVersion>3.1.1</mavenFilteringVersion>
+    <mavenFilteringVersion>3.2.0</mavenFilteringVersion>
     <sitePluginVersion>3.3</sitePluginVersion>
     <project.build.outputTimestamp>2020-04-07T21:04:00Z</project.build.outputTimestamp>
   </properties>
