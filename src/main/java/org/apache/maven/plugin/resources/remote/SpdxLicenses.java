@@ -37,8 +37,7 @@ import java.util.TreeSet;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import org.apache.maven.model.License;
-import org.apache.maven.project.MavenProject;
+import org.apache.maven.api.model.License;
 
 /**
  * Resolves a license declared in a POM to an <a href="https://spdx.org/licenses/">SPDX license ID</a>.
@@ -162,7 +161,7 @@ public class SpdxLicenses {
      * @return the SPDX expression, or {@code null} when the project declares no license or one of its
      *         licenses matches nothing
      */
-    public String expression(MavenProject project) {
+    public String expression(RemoteResourcesProject project) {
         List<License> licenses = project == null ? null : project.getLicenses();
         if (licenses == null || licenses.isEmpty()) {
             return null;
@@ -197,7 +196,7 @@ public class SpdxLicenses {
      * @param project a project, typically a dependency
      * @return the SPDX ID or expression of the chosen license, or {@code null} when none of its licenses resolve
      */
-    public String preferred(MavenProject project) {
+    public String preferred(RemoteResourcesProject project) {
         List<License> licenses = project == null ? null : project.getLicenses();
         if (licenses == null) {
             return null;
@@ -331,10 +330,10 @@ public class SpdxLicenses {
      * @param projects projects, typically <code>$projects</code>
      * @return the projects for each preferred license, sorted by SPDX ID
      */
-    public Map<String, List<MavenProject>> group(List<MavenProject> projects) {
-        Map<String, List<MavenProject>> groups = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+    public Map<String, List<RemoteResourcesProject>> group(List<RemoteResourcesProject> projects) {
+        Map<String, List<RemoteResourcesProject>> groups = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
         if (projects != null) {
-            for (MavenProject project : projects) {
+            for (RemoteResourcesProject project : projects) {
                 String preferred = preferred(project);
                 if (preferred != null) {
                     groups.computeIfAbsent(preferred, k -> new ArrayList<>()).add(project);
@@ -351,7 +350,7 @@ public class SpdxLicenses {
      * @param projects projects, typically <code>$projects</code>
      * @return the IDs, sorted
      */
-    public Set<String> licenseIds(List<MavenProject> projects) {
+    public Set<String> licenseIds(List<RemoteResourcesProject> projects) {
         Set<String> result = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
         for (String expression : group(projects).keySet()) {
             Matcher m = EXPRESSION_TOKEN.matcher(expression);
@@ -371,10 +370,10 @@ public class SpdxLicenses {
      * @param projects projects, typically <code>$projects</code>
      * @return the projects that declare no license, or only licenses that match nothing
      */
-    public List<MavenProject> unresolved(List<MavenProject> projects) {
-        List<MavenProject> result = new ArrayList<>();
+    public List<RemoteResourcesProject> unresolved(List<RemoteResourcesProject> projects) {
+        List<RemoteResourcesProject> result = new ArrayList<>();
         if (projects != null) {
-            for (MavenProject project : projects) {
+            for (RemoteResourcesProject project : projects) {
                 if (preferred(project) == null) {
                     result.add(project);
                 }

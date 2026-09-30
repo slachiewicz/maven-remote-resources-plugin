@@ -27,20 +27,20 @@ import java.nio.file.Files;
 import java.util.Comparator;
 import java.util.List;
 
-import org.apache.maven.plugin.AbstractMojo;
-import org.apache.maven.plugin.MojoExecutionException;
+import org.apache.maven.api.di.Inject;
+import org.apache.maven.api.plugin.Log;
+import org.apache.maven.api.plugin.MojoException;
+import org.apache.maven.api.plugin.annotations.Mojo;
+import org.apache.maven.api.plugin.annotations.Parameter;
 import org.apache.maven.plugin.resources.remote.io.xpp3.RemoteResourcesBundleXpp3Writer;
-import org.apache.maven.plugins.annotations.LifecyclePhase;
-import org.apache.maven.plugins.annotations.Mojo;
-import org.apache.maven.plugins.annotations.Parameter;
 import org.codehaus.plexus.util.DirectoryScanner;
 
 /**
  * Bundle up resources that should be considered as a remote-resource,
  * generating <code>META-INF/maven/remote-resources.xml</code> descriptor.
  */
-@Mojo(name = "bundle", defaultPhase = LifecyclePhase.GENERATE_RESOURCES, threadSafe = true)
-public class BundleRemoteResourcesMojo extends AbstractMojo {
+@Mojo(name = "bundle", defaultPhase = "generate-resources")
+public class BundleRemoteResourcesMojo implements org.apache.maven.api.plugin.Mojo {
     public static final String RESOURCES_MANIFEST = "META-INF/maven/remote-resources.xml";
 
     private static final String[] DEFAULT_INCLUDES = new String[] {
@@ -50,7 +50,7 @@ public class BundleRemoteResourcesMojo extends AbstractMojo {
     /**
      * The directory which contains the resources you want packaged up in this resource bundle.
      */
-    @Parameter(defaultValue = "${basedir}/src/main/resources")
+    @Parameter(defaultValue = "${project.basedir}/src/main/resources")
     private File resourcesDirectory;
 
     /**
@@ -94,15 +94,18 @@ public class BundleRemoteResourcesMojo extends AbstractMojo {
     @Parameter(property = "bundle.requiredProjectProperties")
     private List<String> requiredProjectProperties;
 
+    @Inject
+    private Log log;
+
     @Override
-    public void execute() throws MojoExecutionException {
+    public void execute() throws MojoException {
         if (!resourcesDirectory.exists()) {
-            getLog().info("skip non existing resourceDirectory " + resourcesDirectory.getAbsolutePath());
+            log.info("skip non existing resourceDirectory " + resourcesDirectory.getAbsolutePath());
             return;
         }
 
         if (sourceEncoding == null || sourceEncoding.isEmpty()) {
-            getLog().warn("sourceEncoding has not been set; using platform encoding " + Charset.defaultCharset()
+            log.warn("sourceEncoding has not been set; using platform encoding " + Charset.defaultCharset()
                     + "; i.e. build is platform dependent!");
             sourceEncoding = Charset.defaultCharset().name();
         }
@@ -138,7 +141,7 @@ public class BundleRemoteResourcesMojo extends AbstractMojo {
         }
 
         int n = remoteResourcesBundle.getRemoteResources().size();
-        getLog().info("Writing " + RESOURCES_MANIFEST + " descriptor with " + n + " entr" + ((n > 1) ? "ies" : "y"));
+        log.info("Writing " + RESOURCES_MANIFEST + " descriptor with " + n + " entr" + ((n > 1) ? "ies" : "y"));
 
         RemoteResourcesBundleXpp3Writer w = new RemoteResourcesBundleXpp3Writer();
 
@@ -147,13 +150,13 @@ public class BundleRemoteResourcesMojo extends AbstractMojo {
         try {
             Files.createDirectories(f.getParentFile().toPath());
         } catch (IOException e) {
-            throw new MojoExecutionException("Error creating remote resources manifest.", e);
+            throw new MojoException("Error creating remote resources manifest.", e);
         }
 
         try (Writer writer = new FileWriter(f)) {
             w.write(writer, remoteResourcesBundle);
         } catch (IOException e) {
-            throw new MojoExecutionException("Error creating remote resources manifest.", e);
+            throw new MojoException("Error creating remote resources manifest.", e);
         }
     }
 }

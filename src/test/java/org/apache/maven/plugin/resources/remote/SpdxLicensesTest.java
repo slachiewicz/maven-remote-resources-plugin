@@ -22,9 +22,8 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 
-import org.apache.maven.model.License;
-import org.apache.maven.model.Model;
-import org.apache.maven.project.MavenProject;
+import org.apache.maven.api.model.License;
+import org.apache.maven.api.model.Model;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -130,14 +129,14 @@ class SpdxLicensesTest {
 
     @Test
     void groupsListEachLicenseOnce() {
-        MavenProject a = project(license("Apache License, Version 2.0", null));
-        MavenProject b = project(license("The Apache Software License, Version 2.0", null));
-        MavenProject c = project(license("CDDL 1.1", null), license("GPL2 w/ CPE", null));
-        MavenProject d = project(license("Public Domain", null));
-        MavenProject e = project(license("Apache-2.0 OR MIT", null));
-        List<MavenProject> projects = Arrays.asList(a, b, c, d, e);
+        RemoteResourcesProject a = project(license("Apache License, Version 2.0", null));
+        RemoteResourcesProject b = project(license("The Apache Software License, Version 2.0", null));
+        RemoteResourcesProject c = project(license("CDDL 1.1", null), license("GPL2 w/ CPE", null));
+        RemoteResourcesProject d = project(license("Public Domain", null));
+        RemoteResourcesProject e = project(license("Apache-2.0 OR MIT", null));
+        List<RemoteResourcesProject> projects = Arrays.asList(a, b, c, d, e);
 
-        Map<String, List<MavenProject>> groups = spdx.group(projects);
+        Map<String, List<RemoteResourcesProject>> groups = spdx.group(projects);
         assertEquals(
                 Arrays.asList("Apache-2.0", "CDDL-1.1"),
                 Arrays.asList(groups.keySet().toArray()));
@@ -197,18 +196,12 @@ class SpdxLicensesTest {
     }
 
     private static License license(String name, String url) {
-        License license = new License();
-        license.setName(name);
-        license.setUrl(url);
-        return license;
+        return License.newBuilder().name(name).url(url).build();
     }
 
-    private static MavenProject project(License... licenses) {
-        Model model = new Model();
-        for (License license : licenses) {
-            model.addLicense(license);
-        }
-        return new MavenProject(model);
+    private static RemoteResourcesProject project(License... licenses) {
+        Model model = Model.newBuilder().licenses(List.of(licenses)).build();
+        return new RemoteResourcesProject(model, null, null);
     }
 
     @Test
@@ -245,9 +238,10 @@ class SpdxLicensesTest {
 
     @Test
     void license() {
-        License license = new License();
-        license.setName("Apache License, Version 2.0");
-        license.setUrl("https://www.apache.org/licenses/LICENSE-2.0");
+        License license = License.newBuilder()
+                .name("Apache License, Version 2.0")
+                .url("https://www.apache.org/licenses/LICENSE-2.0")
+                .build();
         assertEquals("Apache-2.0", spdx.id(license));
     }
 }

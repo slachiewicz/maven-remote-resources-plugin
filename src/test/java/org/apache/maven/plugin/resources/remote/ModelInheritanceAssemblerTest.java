@@ -25,57 +25,57 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 /**
  * Unit tests for the SCM path normalization in {@link ModelInheritanceAssembler}.
  */
-public class ModelInheritanceAssemblerTest {
+class ModelInheritanceAssemblerTest {
 
     private final ModelInheritanceAssembler assembler = new ModelInheritanceAssembler();
 
     @Test
-    public void appendPathPreservesTrailingSlash() {
+    void appendPathPreservesTrailingSlash() {
         assertEquals(
                 "http://svn.example.com/repo/",
                 assembler.appendPath("http://svn.example.com/repo/", null, null, false));
     }
 
     @Test
-    public void appendPathAppendsChild() {
+    void appendPathAppendsChild() {
         assertEquals(
                 "http://svn.example.com/repo/child",
                 assembler.appendPath("http://svn.example.com/repo", "child", null, true));
     }
 
     @Test
-    public void appendPathCollapsesDotSegment() {
+    void appendPathCollapsesDotSegment() {
         assertEquals(
                 "http://svn.example.com/repo/child",
                 assembler.appendPath("http://svn.example.com/repo/./child", null, null, false));
     }
 
     @Test
-    public void appendPathResolvesParentDirectory() {
+    void appendPathResolvesParentDirectory() {
         assertEquals(
                 "http://svn.example.com/repos",
                 assembler.appendPath("http://svn.example.com/repos/project/..", null, null, false));
     }
 
     @Test
-    public void appendPathCollapsesRedundantSeparators() {
+    void appendPathCollapsesRedundantSeparators() {
         assertEquals(
                 "http://svn.example.com/repo/child",
                 assembler.appendPath("http://svn.example.com/repo//child", null, null, false));
     }
 
     @Test
-    public void appendPathPreservesExcessParentDirectory() {
+    void appendPathPreservesExcessParentDirectory() {
         assertEquals("../x", assembler.appendPath("a/../../x", null, null, false));
     }
 
     @Test
-    public void appendPathResolvesParentDirectoryInAbsolutePath() {
+    void appendPathResolvesParentDirectoryInAbsolutePath() {
         assertEquals("/x", assembler.appendPath("/a/../x", null, null, false));
     }
 
     @Test
-    public void appendPathKeepsParentDirectoryAboveRoot() {
+    void appendPathKeepsParentDirectoryAboveRoot() {
         assertEquals("/../x", assembler.appendPath("/../x", null, null, false));
     }
 
@@ -84,7 +84,7 @@ public class ModelInheritanceAssemblerTest {
      * identically on every platform.
      */
     @Test
-    public void appendPathNormalizesUrlWithPort() {
+    void appendPathNormalizesUrlWithPort() {
         assertEquals("http://host:8080/x", assembler.appendPath("http://host:8080/repo/../x", null, null, false));
     }
 }

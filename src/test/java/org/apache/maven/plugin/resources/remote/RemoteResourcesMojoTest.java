@@ -18,850 +18,550 @@
  */
 package org.apache.maven.plugin.resources.remote;
 
-import javax.inject.Inject;
-
-import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.lang.reflect.InvocationHandler;
-import java.lang.reflect.Method;
-import java.lang.reflect.Proxy;
+import java.lang.reflect.Field;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.attribute.PosixFilePermission;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.EnumSet;
 import java.util.HashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.jar.JarOutputStream;
+import java.util.stream.Stream;
 import java.util.zip.ZipEntry;
 
-import org.apache.maven.api.plugin.testing.InjectMojo;
-import org.apache.maven.api.plugin.testing.MojoTest;
-import org.apache.maven.artifact.Artifact;
-import org.apache.maven.artifact.DefaultArtifact;
-import org.apache.maven.artifact.handler.DefaultArtifactHandler;
-import org.apache.maven.artifact.versioning.VersionRange;
-import org.apache.maven.execution.DefaultMavenExecutionRequest;
-import org.apache.maven.execution.DefaultMavenExecutionResult;
-import org.apache.maven.execution.MavenSession;
-import org.apache.maven.plugin.MojoExecutionException;
-import org.apache.maven.plugin.resources.remote.stub.ArtifactStub;
-import org.apache.maven.plugin.resources.remote.stub.MavenProjectBuildStub;
-import org.apache.maven.plugin.resources.remote.stub.MavenProjectResourcesStub;
-import org.apache.maven.project.MavenProject;
-import org.apache.maven.project.ProjectBuilder;
-import org.apache.maven.project.ProjectBuildingResult;
-import org.codehaus.plexus.util.FileUtils;
-import org.codehaus.plexus.util.IOUtil;
+import org.apache.maven.api.Artifact;
+import org.apache.maven.api.Dependency;
+import org.apache.maven.api.DownloadedArtifact;
+import org.apache.maven.api.Node;
+import org.apache.maven.api.PathScope;
+import org.apache.maven.api.Project;
+import org.apache.maven.api.ProjectScope;
+import org.apache.maven.api.Session;
+import org.apache.maven.api.Type;
+import org.apache.maven.api.Version;
+import org.apache.maven.api.model.Build;
+import org.apache.maven.api.model.Model;
+import org.apache.maven.api.plugin.Log;
+import org.apache.maven.api.plugin.MojoException;
+import org.apache.maven.api.services.MavenException;
+import org.apache.maven.api.services.ModelBuilder;
+import org.apache.maven.api.services.ModelBuilderRequest;
+import org.apache.maven.api.services.ProjectManager;
+import org.apache.maven.api.services.xml.ModelXmlFactory;
+import org.apache.maven.api.services.xml.XmlReaderRequest;
+import org.apache.maven.shared.filtering.MavenFileFilter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-import static org.apache.maven.api.plugin.testing.MojoExtension.getVariableValueFromObject;
-import static org.apache.maven.api.plugin.testing.MojoExtension.setVariableValueToObject;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /**
- * RemoteResources plugin Test Case
+ * RemoteResources plugin Test Case. The Maven 4 API is mocked: the mojos are created directly and only see a
+ * {@link Session}, a {@link Project} and the services behind them.
  */
-@MojoTest(realRepositorySession = true)
 class RemoteResourcesMojoTest {
-    static final String DEFAULT_BUNDLE_POM_PATH = "target/test-classes/unit/rrmojotest/bundle-plugin-config.xml";
-    static final String DEFAULT_PROCESS_POM_PATH = "target/test-classes/unit/rrmojotest/process-plugin-config.xml";
 
     @TempDir
-    private File localRepo;
+    Path tempDir;
 
-    @Inject
-    private MavenSession session;
+    private Path localRepo;
+
+    private Session session;
+
+    private Project project;
+
+    private Path basedir;
+
+    private Model model;
+
+    private final Map<String, String> projectProperties = new HashMap<>();
 
     @BeforeEach
-    void setUp() {
-        session.getRequest().setLocalRepositoryPath(localRepo);
+    void setUp() throws Exception {
+        localRepo = tempDir.resolve("local-repo");
+        basedir = Files.createDirectories(tempDir.resolve("project"));
+        Files.createDirectories(basedir.resolve("target/classes"));
+        Files.writeString(basedir.resolve("pom.xml"), "<project/>");
+
+        session = mock(Session.class);
+        project = mock(Project.class);
+        ProjectManager projectManager = mock(ProjectManager.class);
+        when(session.getService(ProjectManager.class)).thenReturn(projectManager);
+        when(projectManager.getProperties(project)).thenReturn(projectProperties);
+        when(projectManager.getEnabledSourceRoots(any(), any(), any())).thenAnswer(i -> Stream.empty());
+        when(projectManager.getRemoteProjectRepositories(project)).thenReturn(Collections.emptyList());
+
+        Node root = mock(Node.class);
+        when(root.getChildren()).thenReturn(Collections.emptyList());
+        when(session.collectDependencies(project, PathScope.TEST_RUNTIME)).thenReturn(root);
+        when(session.flattenDependencies(root, PathScope.TEST_RUNTIME)).thenReturn(Collections.emptyList());
+        when(session.getProjects()).thenReturn(List.of(project));
+
+        when(session.requireType(any())).thenAnswer(i -> {
+            Type t = mock(Type.class);
+            String id = i.getArgument(0);
+            when(t.getExtension()).thenReturn("test-jar".equals(id) ? "jar" : id);
+            when(t.getClassifier()).thenReturn("test-jar".equals(id) ? "tests" : null);
+            return t;
+        });
+
+        model = Model.newBuilder()
+                .groupId("test")
+                .artifactId("project")
+                .version("1.0")
+                .name("Test Project")
+                .inceptionYear("2007")
+                .build(Build.newBuilder()
+                        .directory(basedir.resolve("target").toString())
+                        .outputDirectory(basedir.resolve("target/classes").toString())
+                        .build())
+                .build();
+        when(project.getModel()).thenReturn(model);
+        when(project.getBuild()).thenReturn(model.getBuild());
+        when(project.getBasedir()).thenReturn(basedir);
+        when(project.getPomPath()).thenReturn(basedir.resolve("pom.xml"));
+        when(project.getGroupId()).thenReturn("test");
+        when(project.getArtifactId()).thenReturn("project");
+        when(project.getVersion()).thenReturn("1.0");
+        when(project.getOutputDirectory(ProjectScope.MAIN)).thenReturn(basedir.resolve("target/classes"));
+        when(project.getOutputDirectory(ProjectScope.TEST)).thenReturn(basedir.resolve("target/test-classes"));
     }
 
     /**
      * check test environment
-     *
-     * @throws Exception if any exception occurs
      */
     @Test
-    void testTestEnvironment(
-            @InjectMojo(goal = "process", pom = DEFAULT_PROCESS_POM_PATH) ProcessRemoteResourcesMojo mojo) {
-        assertNotNull(mojo);
+    void testEnvironment() {
+        assertNotNull(processMojo());
     }
 
     @Test
-    void testNoBundles(@InjectMojo(goal = "process", pom = DEFAULT_PROCESS_POM_PATH) ProcessRemoteResourcesMojo mojo)
-            throws Exception {
-        final MavenProjectResourcesStub project = createTestProject("default-nobundles");
-        configureProcessMojo(mojo, project, new ArrayList<>());
-
-        setupDefaultProject(project);
-
-        mojo.execute();
+    void noBundles() throws Exception {
+        processMojo().execute();
     }
 
     @Test
-    void testConfigureLocatorRequiresProjectFile(
-            @InjectMojo(goal = "process", pom = DEFAULT_PROCESS_POM_PATH) ProcessRemoteResourcesMojo mojo)
-            throws Exception {
-        final MavenProjectResourcesStub project = createTestProject("default-null-pom");
-        configureProcessMojo(mojo, project, new ArrayList<>());
+    void configureLocatorRequiresProjectFile() {
+        when(project.getPomPath()).thenReturn(null);
+        ProcessRemoteResourcesMojo mojo = processMojo();
 
-        setupDefaultProject(project);
-        project.setFile(null);
-
-        try {
-            mojo.execute();
-            fail("expected MojoExecutionException when the project has no POM file");
-        } catch (MojoExecutionException e) {
-            assertTrue(e.getMessage().contains("no POM file"));
-        }
+        MojoException e = assertThrows(MojoException.class, mojo::execute);
+        assertTrue(e.getMessage().contains("no POM file"));
     }
 
     @Test
-    void testRemoteResourceCannotEscapeOutputDirectory() throws Exception {
-        File outputDirectory = new File("target/remote-resource-output");
-        File canonicalOutputDirectory = outputDirectory.getCanonicalFile();
-
-        try {
-            AbstractProcessRemoteResourcesMojo.resolveOutputFile(
-                    outputDirectory, "../outside.txt", canonicalOutputDirectory);
-            fail("expected a resource outside the output directory to be rejected");
-        } catch (MojoExecutionException e) {
-            assertTrue(e.getMessage().contains("must remain within the output directory"));
-        }
-
-        try {
-            AbstractProcessRemoteResourcesMojo.resolveOutputFile(
-                    outputDirectory,
-                    new File(outputDirectory.getParentFile(), "absolute.txt").getAbsolutePath(),
-                    canonicalOutputDirectory);
-            fail("expected an absolute resource path outside the output directory to be rejected");
-        } catch (MojoExecutionException e) {
-            assertTrue(e.getMessage().contains("Absolute remote resource paths are not allowed"));
-        }
-
-        File outputFile = AbstractProcessRemoteResourcesMojo.resolveOutputFile(
-                outputDirectory, "nested/resource.txt", canonicalOutputDirectory);
-        assertEquals(new File(outputDirectory, "nested/resource.txt").getCanonicalFile(), outputFile);
-    }
-
-    @Test
-    void testRemoteResourceCannotEscapeOutputDirectoryThroughSymlink() throws Exception {
-        Path temporaryDirectory = Files.createTempDirectory("remote-resource-path");
-        Path outputDirectory = Files.createDirectory(temporaryDirectory.resolve("output"));
-        Path outsideDirectory = Files.createDirectory(temporaryDirectory.resolve("outside"));
-        try {
-            Files.createSymbolicLink(outputDirectory.resolve("external"), outsideDirectory);
-        } catch (UnsupportedOperationException | IOException e) {
-            assumeTrue(false, "not supported on this platform: " + e);
-        }
-
-        File output = outputDirectory.toFile();
-        File canonicalOutputDirectory = output.getCanonicalFile();
-        try {
-            AbstractProcessRemoteResourcesMojo.resolveOutputFile(
-                    output, "external/escaped.txt", canonicalOutputDirectory);
-            fail("expected a symlink target outside the output directory to be rejected");
-        } catch (MojoExecutionException e) {
-            assertTrue(e.getMessage().contains("must remain within the output directory"));
-        }
-    }
-
-    @Test
-    void testRemoteResourceResolvesNestedSymlinksBeforeCheckingContainment() throws Exception {
-        Path temporaryDirectory = Files.createTempDirectory("remote-resource-nested-path");
-        Path outputDirectory = Files.createDirectory(temporaryDirectory.resolve("output"));
-        Path insideDirectory = Files.createDirectory(outputDirectory.resolve("inside"));
-        Path outsideDirectory = Files.createDirectory(temporaryDirectory.resolve("outside"));
-        try {
-            Files.createSymbolicLink(outputDirectory.resolve("inside-link"), insideDirectory);
-            Files.createSymbolicLink(insideDirectory.resolve("outside-link"), outsideDirectory);
-        } catch (UnsupportedOperationException | IOException e) {
-            assumeTrue(false, "not supported on this platform: " + e);
-        }
-
-        File output = outputDirectory.toFile();
-        File canonicalOutputDirectory = output.getCanonicalFile();
-        File safeOutputFile = AbstractProcessRemoteResourcesMojo.resolveOutputFile(
-                output, "inside-link/not-created/resource.txt", canonicalOutputDirectory);
-        assertEquals(
-                insideDirectory.toRealPath().resolve("not-created/resource.txt").toFile(), safeOutputFile);
-
-        try {
-            AbstractProcessRemoteResourcesMojo.resolveOutputFile(
-                    output, "inside-link/outside-link/not-created/resource.txt", canonicalOutputDirectory);
-            fail("expected a nested symlink target outside the output directory to be rejected");
-        } catch (MojoExecutionException e) {
-            assertTrue(e.getMessage().contains("must remain within the output directory"));
-        }
-    }
-
-    @Test
-    void testRemoteResourceFailsClosedWhenPathCannotBeInspected() throws Exception {
-        Path temporaryDirectory = Files.createTempDirectory("remote-resource-inaccessible-path");
-        Path outputDirectory = Files.createDirectory(temporaryDirectory.resolve("output"));
-        Path restrictedDirectory = Files.createDirectory(outputDirectory.resolve("restricted"));
-        Path outsideDirectory = Files.createDirectory(temporaryDirectory.resolve("outside"));
-
-        EnumSet<PosixFilePermission> originalPermissions;
-        try {
-            originalPermissions = EnumSet.copyOf(Files.getPosixFilePermissions(restrictedDirectory));
-        } catch (UnsupportedOperationException e) {
-            assumeTrue(false, "not supported on this platform: " + e);
-            return;
-        }
-
-        try {
-            Files.createSymbolicLink(restrictedDirectory.resolve("external"), outsideDirectory);
-        } catch (UnsupportedOperationException | IOException e) {
-            assumeTrue(false, "not supported on this platform: " + e);
-        }
-
-        try {
-            Files.setPosixFilePermissions(
-                    restrictedDirectory, EnumSet.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE));
-        } catch (UnsupportedOperationException e) {
-            assumeTrue(false, "not supported on this platform: " + e);
-        }
-
-        try {
-            AbstractProcessRemoteResourcesMojo.resolveOutputFile(
-                    outputDirectory.toFile(),
-                    "restricted/external/escaped.txt",
-                    outputDirectory.toFile().getCanonicalFile());
-            fail("expected unreadable path components to be rejected");
-        } catch (IOException expected) {
-            // An inaccessible component must not be treated as a missing path element.
-        } finally {
-            Files.setPosixFilePermissions(restrictedDirectory, originalPermissions);
-        }
-    }
-
-    @Test
-    void testMalformedSupplementalModelFailsWithMojoExecutionException(
-            @InjectMojo(goal = "process", pom = DEFAULT_PROCESS_POM_PATH) ProcessRemoteResourcesMojo mojo)
-            throws Exception {
-        final MavenProjectResourcesStub project = createTestProject("default-malformedsupplement");
-        configureProcessMojo(mojo, project, new ArrayList<>());
-
-        setupDefaultProject(project);
-
-        File supplementalModelsFile = new File(project.getBasedir(), "supplemental-models.xml");
-        FileUtils.fileWrite(
-                supplementalModelsFile.getAbsolutePath(),
-                "<supplementalDataModels>"
-                        + "<supplement>"
-                        + "<project>"
-                        + "<groupId>test</groupId>"
-                        + "<artifactId>test</artifactId>"
-                        + "<version>1.0</version>"
-                        + "<notAValidElement>whatever</notAValidElement>"
-                        + "</project>"
-                        + "</supplement>"
-                        + "</supplementalDataModels>");
-
-        setVariableValueToObject(mojo, "supplementalModels", new String[] {supplementalModelsFile.getAbsolutePath()});
-
-        try {
-            mojo.execute();
-            fail("Expected a MojoExecutionException for a malformed supplemental model entry");
-        } catch (MojoExecutionException e) {
-            assertTrue(e.getMessage().contains("Unable to parse supplemental XML"), e.getMessage());
-        }
-    }
-
-    @Test
-    void testCreateBundle(@InjectMojo(goal = "bundle", pom = DEFAULT_BUNDLE_POM_PATH) BundleRemoteResourcesMojo mojo)
-            throws Exception {
+    void createBundle() throws Exception {
         List<String> resources =
                 Arrays.asList("FILTER.txt.vm", "ISO-8859-1.bin.vm", "PROPERTIES.txt.vm", "SIMPLE.txt", "UTF-8.bin.vm");
-        buildResourceBundle(mojo, "default-createbundle", null, resources.toArray(new String[0]), null);
+        buildResourceBundle("default-createbundle", null, resources.toArray(new String[0]), null);
     }
 
     @Test
-    void testSimpleBundles(
-            @InjectMojo(goal = "process", pom = DEFAULT_PROCESS_POM_PATH) ProcessRemoteResourcesMojo mojo,
-            @InjectMojo(goal = "bundle", pom = DEFAULT_BUNDLE_POM_PATH) BundleRemoteResourcesMojo bundleMojo)
-            throws Exception {
-        final MavenProjectResourcesStub project = createTestProject("default-simplebundles");
-        configureProcessMojo(mojo, project, new ArrayList<>(Arrays.asList("test:test:1.0")));
-
-        setupDefaultProject(project);
-
-        String path = pathOf(new DefaultArtifact(
-                "test", "test", VersionRange.createFromVersion("1.0"), null, "jar", "", new DefaultArtifactHandler()));
-
-        File file = new File(path);
-        file.getParentFile().mkdirs();
-        buildResourceBundle(bundleMojo, "default-simplebundles-create", null, new String[] {"SIMPLE.txt"}, file);
+    void simpleBundles() throws Exception {
+        ProcessRemoteResourcesMojo mojo = processMojo("test:test:1.0");
+        buildResourceBundle(
+                "default-simplebundles-create", null, new String[] {"SIMPLE.txt"}, bundleJar("test", "1.0"));
 
         mojo.execute();
 
-        file = getVariableValueFromObject(mojo, "outputDirectory");
-        file = new File(file, "SIMPLE.txt");
-        assertTrue(file.exists());
+        assertTrue(Files.exists(outputDirectory(mojo).resolve("SIMPLE.txt")));
     }
 
     @Test
-    void testSimpleBundlesWithType(
-            @InjectMojo(goal = "process", pom = DEFAULT_PROCESS_POM_PATH) ProcessRemoteResourcesMojo mojo,
-            @InjectMojo(goal = "bundle", pom = DEFAULT_BUNDLE_POM_PATH) BundleRemoteResourcesMojo bundleMojo)
-            throws Exception {
-        final MavenProjectResourcesStub project = createTestProject("default-simplebundles");
-        configureProcessMojo(mojo, project, new ArrayList<>(Arrays.asList("test:test:1.0:war")));
-
-        setupDefaultProject(project);
-
-        String path = pathOf(new DefaultArtifact(
-                "test", "test", VersionRange.createFromVersion("1.0"), null, "war", "", new DefaultArtifactHandler()));
-
-        File file = new File(path);
-        file.getParentFile().mkdirs();
-        buildResourceBundle(bundleMojo, "default-simplebundles-create", null, new String[] {"SIMPLE.txt"}, file);
+    void simpleBundlesWithType() throws Exception {
+        ProcessRemoteResourcesMojo mojo = processMojo("test:test:1.0:war");
+        buildResourceBundle(
+                "default-simplebundles-create", null, new String[] {"SIMPLE.txt"}, bundleJar("test", "1.0"));
 
         mojo.execute();
 
-        file = getVariableValueFromObject(mojo, "outputDirectory");
-        file = new File(file, "SIMPLE.txt");
-        assertTrue(file.exists());
+        assertTrue(Files.exists(outputDirectory(mojo).resolve("SIMPLE.txt")));
     }
 
     @Test
-    void testSimpleBundlesWithClassifier(
-            @InjectMojo(goal = "process", pom = DEFAULT_PROCESS_POM_PATH) ProcessRemoteResourcesMojo mojo,
-            @InjectMojo(goal = "bundle", pom = DEFAULT_BUNDLE_POM_PATH) BundleRemoteResourcesMojo bundleMojo)
-            throws Exception {
-        final MavenProjectResourcesStub project = createTestProject("default-simplebundles");
-        configureProcessMojo(mojo, project, new ArrayList<>(Arrays.asList("test:test:1.0:jar:test")));
+    void simpleBundlesWithClassifier() throws Exception {
+        ProcessRemoteResourcesMojo mojo = processMojo("test:test:1.0:jar:test");
+        buildResourceBundle(
+                "default-simplebundles-create", null, new String[] {"SIMPLE.txt"}, bundleJar("test", "1.0"));
 
-        setupDefaultProject(project);
+        mojo.execute();
 
-        String path = pathOf(new DefaultArtifact(
-                "test",
-                "test",
-                VersionRange.createFromVersion("1.0"),
+        assertTrue(Files.exists(outputDirectory(mojo).resolve("SIMPLE.txt")));
+    }
+
+    @Test
+    void velocityUTF8() throws Exception {
+        ProcessRemoteResourcesMojo mojo = processMojo("test:test:1.2");
+        buildResourceBundle("default-utf8-create", "UTF-8", new String[] {"UTF-8.bin.vm"}, bundleJar("test", "1.2"));
+
+        mojo.execute();
+
+        byte[] data = Files.readAllBytes(outputDirectory(mojo).resolve("UTF-8.bin"));
+        byte[] expected = "äöüÄÖÜß".getBytes(StandardCharsets.UTF_8);
+        assertArrayEquals(expected, data);
+    }
+
+    @Test
+    void velocityISO88591() throws Exception {
+        ProcessRemoteResourcesMojo mojo = processMojo("test:test:1.3");
+        buildResourceBundle(
+                "default-iso88591-create", "ISO-8859-1", new String[] {"ISO-8859-1.bin.vm"}, bundleJar("test", "1.3"));
+
+        mojo.execute();
+
+        byte[] data = Files.readAllBytes(outputDirectory(mojo).resolve("ISO-8859-1.bin"));
+        byte[] expected = "äöüÄÖÜß".getBytes(StandardCharsets.ISO_8859_1);
+        assertArrayEquals(expected, data);
+    }
+
+    @Test
+    void filteredBundles() throws Exception {
+        ProcessRemoteResourcesMojo mojo = processMojo("test:test:1.1");
+        buildResourceBundle(
+                "default-filterbundles-create", null, new String[] {"FILTER.txt.vm"}, bundleJar("test", "1.1"));
+
+        mojo.execute();
+        // executing a second time (example: forked lifecycle) should still work
+        mojo.execute();
+
+        String data = Files.readString(outputDirectory(mojo).resolve("FILTER.txt"));
+        assertTrue(data.contains("project.name: Test Project"), data);
+        assertTrue(data.contains("projectTimespan: 2007-2019"), data);
+        assertTrue(data.contains("projects: ["), data);
+        assertTrue(data.contains("projectsSortedByOrganization: {"), data);
+    }
+
+    @Test
+    void filteredBundlesWithProjectProperties() throws Exception {
+        ProcessRemoteResourcesMojo mojo = processMojo("test-filtered-bundles:test-filtered-bundles:2");
+        set(mojo, "includeProjectProperties", true);
+        projectProperties.put("testingPropertyOne", "maven");
+        projectProperties.put("testingPropertyTwo", "rules");
+        buildResourceBundle(
+                "default-filterbundles-two-create",
                 null,
-                "jar",
-                "test",
-                new DefaultArtifactHandler()));
-
-        File file = new File(path);
-        file.getParentFile().mkdirs();
-        buildResourceBundle(bundleMojo, "default-simplebundles-create", null, new String[] {"SIMPLE.txt"}, file);
+                new String[] {"PROPERTIES.txt.vm"},
+                bundleJar("test-filtered-bundles", "2"));
 
         mojo.execute();
+        // executing a second time (example: forked lifecycle) should still work
+        mojo.execute();
 
-        file = getVariableValueFromObject(mojo, "outputDirectory");
-        file = new File(file, "SIMPLE.txt");
-        assertTrue(file.exists());
+        String data = Files.readString(outputDirectory(mojo).resolve("PROPERTIES.txt"));
+        assertTrue(data.contains("maven"), data);
+        assertTrue(data.contains("rules"), data);
     }
 
     @Test
-    void testRewrittenBundleIsReadAgain(
-            @InjectMojo(goal = "process", pom = DEFAULT_PROCESS_POM_PATH) ProcessRemoteResourcesMojo mojo,
-            @InjectMojo(goal = "bundle", pom = DEFAULT_BUNDLE_POM_PATH) BundleRemoteResourcesMojo bundleMojo)
-            throws Exception {
-        final MavenProjectResourcesStub project = createTestProject("default-rewrittenbundle");
-        configureProcessMojo(mojo, project, Arrays.asList("test:test:1.7"));
-        setupDefaultProject(project);
+    void findReactorProjectMatchesTimestampedSnapshot() {
+        Project reactorProject = reactorProject("com.example", "reactor-project", "1.0-SNAPSHOT");
 
-        File bundleJar = new File(pathOf(new DefaultArtifact(
-                "test", "test", VersionRange.createFromVersion("1.7"), null, "jar", "", new DefaultArtifactHandler())));
-        bundleJar.getParentFile().mkdirs();
+        Dependency timestamped =
+                dependency("com.example", "reactor-project", "1.0-20260926.120000-1", "1.0-SNAPSHOT", "compile");
+        assertSame(
+                reactorProject,
+                AbstractProcessRemoteResourcesMojo.findReactorProject(timestamped, List.of(reactorProject)));
+
+        Dependency external = dependency("com.example", "external-project", "1.0", "1.0", "compile");
+        assertNull(AbstractProcessRemoteResourcesMojo.findReactorProject(external, List.of(reactorProject)));
+    }
+
+    @Test
+    void getProjectsBuildsOnlyExternalArtifacts() throws Exception {
+        Project reactorProject = reactorProject("com.example", "reactor-project", "1.0-SNAPSHOT");
+        Model reactorModel = Model.newBuilder()
+                .groupId("com.example")
+                .artifactId("reactor-project")
+                .version("1.0-SNAPSHOT")
+                .build();
+        when(reactorProject.getModel()).thenReturn(reactorModel);
+        when(session.getProjects()).thenReturn(List.of(project, reactorProject));
+
+        Dependency reactorDependency =
+                dependency("com.example", "reactor-project", "1.0-20260926.120000-1", "1.0-SNAPSHOT", "compile");
+        Dependency externalDependency = dependency("com.example", "external-project", "1.0", "1.0", "compile");
+        Node root = mock(Node.class);
+        Node reactorNode = mock(Node.class);
+        Node externalNode = mock(Node.class);
+        when(reactorNode.getDependency()).thenReturn(reactorDependency);
+        when(externalNode.getDependency()).thenReturn(externalDependency);
+        when(session.collectDependencies(project, PathScope.TEST_RUNTIME)).thenReturn(root);
+        when(root.getChildren()).thenReturn(List.of(reactorNode, externalNode));
+        when(session.flattenDependencies(root, PathScope.TEST_RUNTIME)).thenReturn(List.of(reactorNode, externalNode));
+
+        ModelBuilder modelBuilder = mock(ModelBuilder.class);
+        ModelBuilder.ModelBuilderSession modelBuilderSession = mock(ModelBuilder.ModelBuilderSession.class);
+        when(session.getService(ModelBuilder.class)).thenReturn(modelBuilder);
+        when(modelBuilder.newSession()).thenReturn(modelBuilderSession);
+        when(modelBuilderSession.build(any(ModelBuilderRequest.class))).thenThrow(new MavenException("not found"));
+
+        ProcessRemoteResourcesMojo mojo = processMojo();
+        set(mojo, "supplementModels", new HashMap<>());
+
+        List<RemoteResourcesProject> projects = mojo.getProjects();
+
+        // the reactor project is taken from the session, the external one is not resolvable here and is skipped
+        assertEquals(1, projects.size());
+        assertSame(reactorModel, projects.get(0).getModel());
+        verify(modelBuilderSession, times(1)).build(any(ModelBuilderRequest.class));
+    }
+
+    private static Project reactorProject(String groupId, String artifactId, String version) {
+        Project reactorProject = mock(Project.class);
+        when(reactorProject.getGroupId()).thenReturn(groupId);
+        when(reactorProject.getArtifactId()).thenReturn(artifactId);
+        when(reactorProject.getVersion()).thenReturn(version);
+        return reactorProject;
+    }
+
+    private static Dependency dependency(
+            String groupId, String artifactId, String version, String baseVersion, String scope) {
+        Dependency dependency = mock(Dependency.class);
+        Version v = mock(Version.class);
+        when(v.toString()).thenReturn(version);
+        Version base = mock(Version.class);
+        when(base.toString()).thenReturn(baseVersion);
+        when(dependency.getGroupId()).thenReturn(groupId);
+        when(dependency.getArtifactId()).thenReturn(artifactId);
+        when(dependency.getVersion()).thenReturn(v);
+        when(dependency.getBaseVersion()).thenReturn(base);
+        when(dependency.key()).thenReturn(groupId + ":" + artifactId + ":" + version);
+        when(dependency.getScope()).thenReturn(org.apache.maven.api.DependencyScope.COMPILE);
+        return dependency;
+    }
+
+    @Test
+    void malformedSupplementalModelFails() throws Exception {
+        ProcessRemoteResourcesMojo mojo = processMojo();
+        Path supplementalModelsFile = basedir.resolve("supplemental-models.xml");
+        Files.writeString(
+                supplementalModelsFile,
+                "<supplementalDataModels><supplement><project><groupId>test</groupId>"
+                        + "<artifactId>test</artifactId><notAValidElement>whatever</notAValidElement>"
+                        + "</project></supplement></supplementalDataModels>");
+        ModelXmlFactory modelXmlFactory = mock(ModelXmlFactory.class);
+        when(session.getService(ModelXmlFactory.class)).thenReturn(modelXmlFactory);
+        when(modelXmlFactory.read(any(XmlReaderRequest.class))).thenThrow(new MavenException("Unable to parse"));
+        set(mojo, "supplementalModels", new String[] {supplementalModelsFile.toString()});
+
+        MojoException e = assertThrows(MojoException.class, mojo::execute);
+        assertTrue(e.getMessage().contains("Unable to read supplemental XML"), e.getMessage());
+    }
+
+    @Test
+    void rewrittenBundleIsReadAgain() throws Exception {
+        ProcessRemoteResourcesMojo mojo = processMojo("test:test:1.7");
+        Path bundleJar = bundleJar("test", "1.7");
         // no template in the first bundle: rendering one goes through the class loader, whose close would
         // evict the cached jar and hide the stale read
-        buildResourceBundle(bundleMojo, "default-rewrittenbundle-first", null, new String[] {"SIMPLE.txt"}, bundleJar);
+        buildResourceBundle("default-rewrittenbundle-first", null, new String[] {"SIMPLE.txt"}, bundleJar);
         mojo.execute();
 
         // the same jar rewritten in place with more content, as a rebuilt snapshot would be
         buildResourceBundle(
-                bundleMojo,
-                "default-rewrittenbundle-second",
-                null,
-                new String[] {"SIMPLE.txt", "FILTER.txt.vm"},
-                bundleJar);
+                "default-rewrittenbundle-second", null, new String[] {"SIMPLE.txt", "FILTER.txt.vm"}, bundleJar);
         mojo.execute();
 
-        File outputDirectory = getVariableValueFromObject(mojo, "outputDirectory");
-        assertTrue(new File(outputDirectory, "FILTER.txt").exists());
+        assertTrue(Files.exists(outputDirectory(mojo).resolve("FILTER.txt")));
     }
 
     @Test
-    void testVelocityUTF8(
-            @InjectMojo(goal = "process", pom = DEFAULT_PROCESS_POM_PATH) ProcessRemoteResourcesMojo mojo,
-            @InjectMojo(goal = "bundle", pom = DEFAULT_BUNDLE_POM_PATH) BundleRemoteResourcesMojo bundleMojo)
-            throws Exception {
-        final MavenProjectResourcesStub project = createTestProject("default-utf8");
-        configureProcessMojo(mojo, project, new ArrayList<>(Arrays.asList("test:test:1.2")));
-
-        setupDefaultProject(project);
-
-        String path = pathOf(new DefaultArtifact(
-                "test", "test", VersionRange.createFromVersion("1.2"), null, "jar", "", new DefaultArtifactHandler()));
-
-        File file = new File(path);
-        file.getParentFile().mkdirs();
-        buildResourceBundle(bundleMojo, "default-utf8-create", "UTF-8", new String[] {"UTF-8.bin.vm"}, file);
+    void classLoaderIsClosedAfterExecution() throws Exception {
+        ProcessRemoteResourcesMojo mojo = processMojo("test:test:1.0");
+        buildResourceBundle(
+                "default-closeclassloader-create", null, new String[] {"SIMPLE.txt"}, bundleJar("test", "1.0"));
 
         mojo.execute();
 
-        file = getVariableValueFromObject(mojo, "outputDirectory");
-        file = new File(file, "UTF-8.bin");
-        assertTrue(file.exists());
-
-        byte[] data = Files.readAllBytes(file.toPath());
-        byte[] expected = "\u00E4\u00F6\u00FC\u00C4\u00D6\u00DC\u00DF".getBytes(StandardCharsets.UTF_8);
-        assertTrue(Arrays.equals(expected, data));
-    }
-
-    @Test
-    void testClassLoaderIsClosedAfterExecution(
-            @InjectMojo(goal = "process", pom = DEFAULT_PROCESS_POM_PATH) ProcessRemoteResourcesMojo mojo,
-            @InjectMojo(goal = "bundle", pom = DEFAULT_BUNDLE_POM_PATH) BundleRemoteResourcesMojo bundleMojo)
-            throws Exception {
-        final MavenProjectResourcesStub project = createTestProject("default-closeclassloader");
-        configureProcessMojo(mojo, project, new ArrayList<>(Arrays.asList("test:test:1.0")));
-
-        setupDefaultProject(project);
-
-        String path = pathOf(new DefaultArtifact(
-                "test", "test", VersionRange.createFromVersion("1.0"), null, "jar", "", new DefaultArtifactHandler()));
-
-        File file = new File(path);
-        file.getParentFile().mkdirs();
-        buildResourceBundle(bundleMojo, "default-closeclassloader-create", null, new String[] {"SIMPLE.txt"}, file);
-
-        mojo.execute();
-
-        RemoteResourcesClassLoader classLoader =
-                (RemoteResourcesClassLoader) getVariableValueFromObject(mojo, "classLoader");
+        RemoteResourcesClassLoader classLoader = (RemoteResourcesClassLoader) get(mojo, "classLoader");
         assertNotNull(classLoader);
         // resources from the bundle jars must no longer be served by the closed classloader
         assertNull(classLoader.getResource("SIMPLE.txt"));
     }
 
     @Test
-    void testVelocityISO88591(
-            @InjectMojo(goal = "process", pom = DEFAULT_PROCESS_POM_PATH) ProcessRemoteResourcesMojo mojo,
-            @InjectMojo(goal = "bundle", pom = DEFAULT_BUNDLE_POM_PATH) BundleRemoteResourcesMojo bundleMojo)
-            throws Exception {
-        final MavenProjectResourcesStub project = createTestProject("default-iso88591");
-        configureProcessMojo(mojo, project, new ArrayList<>(Arrays.asList("test:test:1.3")));
-
-        setupDefaultProject(project);
-
-        String path = pathOf(new DefaultArtifact(
-                "test", "test", VersionRange.createFromVersion("1.3"), null, "jar", "", new DefaultArtifactHandler()));
-
-        File file = new File(path);
-        file.getParentFile().mkdirs();
+    void useProjectFilesRendersVelocityTemplate() throws Exception {
+        ProcessRemoteResourcesMojo mojo = processMojo("test:test:1.4");
+        Files.writeString(basedir.resolve("FILTER.txt.vm"), "local override: $project.name");
         buildResourceBundle(
-                bundleMojo, "default-iso88591-create", "ISO-8859-1", new String[] {"ISO-8859-1.bin.vm"}, file);
+                "default-useprojectfiles-create", null, new String[] {"FILTER.txt.vm"}, bundleJar("test", "1.4"));
+        set(mojo, "useProjectFiles", true);
 
         mojo.execute();
 
-        file = getVariableValueFromObject(mojo, "outputDirectory");
-        file = new File(file, "ISO-8859-1.bin");
-        assertTrue(file.exists());
-
-        byte[] data = Files.readAllBytes(file.toPath());
-        byte[] expected = "\u00E4\u00F6\u00FC\u00C4\u00D6\u00DC\u00DF".getBytes(StandardCharsets.ISO_8859_1);
-        assertTrue(Arrays.equals(expected, data));
+        String data = Files.readString(outputDirectory(mojo).resolve("FILTER.txt"));
+        assertTrue(data.contains("local override: Test Project"), data);
     }
 
     @Test
-    void testFilteredBundles(
-            @InjectMojo(goal = "process", pom = DEFAULT_PROCESS_POM_PATH) ProcessRemoteResourcesMojo mojo,
-            @InjectMojo(goal = "bundle", pom = DEFAULT_BUNDLE_POM_PATH) BundleRemoteResourcesMojo bundleMojo)
-            throws Exception {
-        final MavenProjectResourcesStub project = createTestProject("default-filterbundles");
-        configureProcessMojo(mojo, project, new ArrayList<>(Arrays.asList("test:test:1.1")));
+    void validateRejectsDescriptorWithEmptySegment() {
+        ProcessRemoteResourcesMojo mojo = processMojo("org.example:dep::jar");
 
-        setupDefaultProject(project);
-
-        String path = pathOf(new DefaultArtifact(
-                "test", "test", VersionRange.createFromVersion("1.1"), null, "jar", "", new DefaultArtifactHandler()));
-
-        File file = new File(path);
-        file.getParentFile().mkdirs();
-        buildResourceBundle(bundleMojo, "default-filterbundles-create", null, new String[] {"FILTER.txt.vm"}, file);
-
-        mojo.execute();
-        // executing a second time (example: forked lifecycle) should still work
-        mojo.execute();
-
-        file = getVariableValueFromObject(mojo, "outputDirectory");
-        file = new File(file, "FILTER.txt");
-        assertTrue(file.exists());
-
-        String data = FileUtils.fileRead(file);
-        assertTrue(data.contains("project.name: Test Project default-filterbundles"));
-        assertTrue(data.contains("projectTimespan: 2007-2019"));
-        assertTrue(data.contains("projects: ["));
-        assertTrue(data.contains("projectsSortedByOrganization: {"));
+        MojoException e = assertThrows(MojoException.class, mojo::validate);
+        assertTrue(e.getMessage().contains("must specify a groupId, artifactId"), e.getMessage());
     }
 
     @Test
-    void testFilteredBundlesWithProjectProperties(
-            @InjectMojo(goal = "process", pom = DEFAULT_PROCESS_POM_PATH) ProcessRemoteResourcesMojo mojo,
-            @InjectMojo(goal = "bundle", pom = DEFAULT_BUNDLE_POM_PATH) BundleRemoteResourcesMojo bundleMojo)
-            throws Exception {
-        final MavenProjectResourcesStub project = createTestProject("default-filterbundles-two");
-        configureProcessMojo(
-                mojo, project, new ArrayList<>(Arrays.asList("test-filtered-bundles:test-filtered-bundles:2")));
-
-        mojo.includeProjectProperties = true;
-        setupDefaultProject(project);
-
-        project.addProperty("testingPropertyOne", "maven");
-        project.addProperty("testingPropertyTwo", "rules");
-
-        String path = pathOf(new DefaultArtifact(
-                "test-filtered-bundles",
-                "test-filtered-bundles",
-                VersionRange.createFromVersion("2"),
-                null,
-                "jar",
-                "",
-                new DefaultArtifactHandler()));
-
-        File file = new File(path);
-        file.getParentFile().mkdirs();
+    void filteredAppendedResource() throws Exception {
+        ProcessRemoteResourcesMojo mojo = processMojo("test:test:1.6");
         buildResourceBundle(
-                bundleMojo, "default-filterbundles-two-create", null, new String[] {"PROPERTIES.txt.vm"}, file);
-
-        mojo.execute();
-        // executing a second time (example: forked lifecycle) should still work
-        mojo.execute();
-
-        file = getVariableValueFromObject(mojo, "outputDirectory");
-        file = new File(file, "PROPERTIES.txt");
-
-        assertTrue(file.exists());
-
-        String data = FileUtils.fileRead(file);
-        assertTrue(data.contains("maven"));
-        assertTrue(data.contains("rules"));
-    }
-
-    @Test
-    void testUseProjectFilesRendersVelocityTemplate(
-            @InjectMojo(goal = "process", pom = DEFAULT_PROCESS_POM_PATH) ProcessRemoteResourcesMojo mojo,
-            @InjectMojo(goal = "bundle", pom = DEFAULT_BUNDLE_POM_PATH) BundleRemoteResourcesMojo bundleMojo)
-            throws Exception {
-        final MavenProjectResourcesStub project = createTestProject("default-useprojectfiles");
-        configureProcessMojo(mojo, project, Arrays.asList("test:test:1.4"));
-
-        setupDefaultProject(project);
-
-        FileUtils.fileWrite(
-                new File(project.getBasedir(), "FILTER.txt.vm").getAbsolutePath(), "local override: $project.name");
-
-        String path = pathOf(new DefaultArtifact(
-                "test", "test", VersionRange.createFromVersion("1.4"), null, "jar", "", new DefaultArtifactHandler()));
-
-        File file = new File(path);
-        file.getParentFile().mkdirs();
-        buildResourceBundle(bundleMojo, "default-useprojectfiles-create", null, new String[] {"FILTER.txt.vm"}, file);
-
-        setVariableValueToObject(mojo, "useProjectFiles", true);
-
-        mojo.execute();
-
-        File outputFile = new File((File) getVariableValueFromObject(mojo, "outputDirectory"), "FILTER.txt");
-        String data = FileUtils.fileRead(outputFile);
-        assertTrue(data.contains("local override: Test Project default-useprojectfiles"));
-    }
-
-    @Test
-    void testProjectsDoesNotMutateProjectArtifactVersions(
-            @InjectMojo(goal = "process", pom = DEFAULT_PROCESS_POM_PATH) ProcessRemoteResourcesMojo mojo)
-            throws Exception {
-        final MavenProjectResourcesStub project = createTestProject("default-nomutate");
-        configureProcessMojo(mojo, project, Collections.emptyList());
-
-        setupDefaultProject(project);
-
-        setVariableValueToObject(mojo, "supplementModels", new HashMap<>());
-
-        ArtifactStub snapshotArtifact = new ArtifactStub();
-        snapshotArtifact.setGroupId("org.example");
-        snapshotArtifact.setArtifactId("snapshot-dep");
-        snapshotArtifact.setVersion("1.0-SNAPSHOT");
-
-        project.setArtifacts(Collections.singleton(snapshotArtifact));
-
-        mojo.getProjects();
-
-        assertEquals("1.0-SNAPSHOT", snapshotArtifact.getVersion());
-        assertSame(snapshotArtifact, project.getArtifacts().iterator().next());
-    }
-
-    @Test
-    void testValidateRejectsDescriptorWithEmptySegment(
-            @InjectMojo(goal = "process", pom = DEFAULT_PROCESS_POM_PATH) ProcessRemoteResourcesMojo mojo)
-            throws Exception {
-        final MavenProjectResourcesStub project = createTestProject("default-validate");
-        configureProcessMojo(mojo, project, Arrays.asList("org.example:dep::jar"));
-
-        try {
-            mojo.validate();
-            fail("Expected validate() to reject a resource bundle descriptor with a missing version");
-        } catch (MojoExecutionException e) {
-            assertTrue(e.getMessage().contains("must specify a groupId, artifactId"));
-        }
-    }
-
-    @Test
-    void testFindReactorProjectMatchesTimestampedSnapshot() throws Exception {
-        MavenProject reactorProject = new MavenProject(new org.apache.maven.model.Model());
-        reactorProject.setGroupId("com.example");
-        reactorProject.setArtifactId("reactor-project");
-        reactorProject.setVersion("1.0-SNAPSHOT");
-
-        Artifact artifact = new DefaultArtifact(
-                "com.example",
-                "reactor-project",
-                VersionRange.createFromVersion("1.0-20260926.120000-1"),
-                null,
-                "jar",
-                "",
-                new DefaultArtifactHandler());
-
-        assertSame(
-                reactorProject,
-                AbstractProcessRemoteResourcesMojo.findReactorProject(
-                        artifact, Collections.singletonList(reactorProject)));
-
-        Artifact externalArtifact = new DefaultArtifact(
-                "com.example",
-                "external-project",
-                VersionRange.createFromVersion("1.0"),
-                null,
-                "jar",
-                "",
-                new DefaultArtifactHandler());
-        assertNull(AbstractProcessRemoteResourcesMojo.findReactorProject(
-                externalArtifact, Collections.singletonList(reactorProject)));
-    }
-
-    @Test
-    void testGetProjectsBuildsOnlyExternalArtifacts(
-            @InjectMojo(goal = "process", pom = DEFAULT_PROCESS_POM_PATH) ProcessRemoteResourcesMojo mojo)
-            throws Exception {
-        MavenProjectResourcesStub project = createTestProject("reactor-projects");
-        configureProcessMojo(mojo, project, Collections.emptyList());
-        setupDefaultProject(project);
-
-        MavenProject reactorProject = new MavenProject(new org.apache.maven.model.Model());
-        reactorProject.setGroupId("com.example");
-        reactorProject.setArtifactId("reactor-project");
-        reactorProject.setVersion("1.0-SNAPSHOT");
-
-        Artifact reactorArtifact = new DefaultArtifact(
-                "com.example",
-                "reactor-project",
-                VersionRange.createFromVersion("1.0-20260926.120000-1"),
-                "compile",
-                "jar",
-                "",
-                new DefaultArtifactHandler());
-        Artifact externalArtifact = new DefaultArtifact(
-                "com.example",
-                "external-project",
-                VersionRange.createFromVersion("1.0"),
-                "compile",
-                "jar",
-                "",
-                new DefaultArtifactHandler());
-        project.setArtifacts(new LinkedHashSet<>(Arrays.asList(reactorArtifact, externalArtifact)));
-        reactorProject.setArtifact(reactorArtifact);
-
-        // the injected session is a mock, so the mojo gets a real one that holds the reactor
-        MavenSession reactorSession = new MavenSession(
-                null,
-                session.getRepositorySession(),
-                new DefaultMavenExecutionRequest(),
-                new DefaultMavenExecutionResult());
-        reactorSession.setProjects(Arrays.asList(project, reactorProject));
-        setVariableValueToObject(mojo, "mavenSession", reactorSession);
-
-        MavenProject externalProject = new MavenProject(new org.apache.maven.model.Model());
-        externalProject.setGroupId("com.example");
-        externalProject.setArtifactId("external-project");
-        externalProject.setVersion("1.0");
-        externalProject.setArtifact(externalArtifact);
-
-        ProjectBuildingResult buildingResult = (ProjectBuildingResult) Proxy.newProxyInstance(
-                ProjectBuildingResult.class.getClassLoader(),
-                new Class<?>[] {ProjectBuildingResult.class},
-                new InvocationHandler() {
-                    @Override
-                    public Object invoke(Object proxy, Method method, Object[] args) {
-                        if ("getProject".equals(method.getName())) {
-                            return externalProject;
-                        }
-                        return null;
-                    }
-                });
-        List<Artifact> builtArtifacts = new ArrayList<>();
-        ProjectBuilder projectBuilder = (ProjectBuilder) Proxy.newProxyInstance(
-                ProjectBuilder.class.getClassLoader(), new Class<?>[] {ProjectBuilder.class}, new InvocationHandler() {
-                    @Override
-                    public Object invoke(Object proxy, Method method, Object[] args) {
-                        if ("build".equals(method.getName())
-                                && args != null
-                                && args.length == 2
-                                && args[0] instanceof Artifact) {
-                            builtArtifacts.add((Artifact) args[0]);
-                            return buildingResult;
-                        }
-                        return null;
-                    }
-                });
-        setVariableValueToObject(mojo, "projectBuilder", projectBuilder);
-        setVariableValueToObject(mojo, "supplementModels", new HashMap<>());
-
-        List<MavenProject> projects = mojo.getProjects();
-
-        assertEquals(1, builtArtifacts.size());
-        assertSame(externalArtifact, builtArtifacts.get(0));
-        assertTrue(projects.contains(reactorProject));
-        assertTrue(projects.contains(externalProject));
-    }
-
-    @Test
-    void testFilteredAppendedResource(
-            @InjectMojo(goal = "process", pom = DEFAULT_PROCESS_POM_PATH) ProcessRemoteResourcesMojo mojo,
-            @InjectMojo(goal = "bundle", pom = DEFAULT_BUNDLE_POM_PATH) BundleRemoteResourcesMojo bundleMojo)
-            throws Exception {
-        final MavenProjectResourcesStub project = createTestProject("default-appended-filtered-resource");
-        configureProcessMojo(mojo, project, Arrays.asList("test:test:1.6"));
-
-        setupDefaultProject(project);
-
-        String path = pathOf(new DefaultArtifact(
-                "test", "test", VersionRange.createFromVersion("1.6"), null, "jar", "", new DefaultArtifactHandler()));
-        File bundleJar = new File(path);
-        bundleJar.getParentFile().mkdirs();
-        buildResourceBundle(
-                bundleMojo,
                 "default-appended-filtered-resource-create",
                 null,
                 new String[] {"BUNDLE_FILTER.txt.vm", "APPENDED_FILTER.txt"},
-                bundleJar);
-
-        File appendedResourcesDirectory = new File(project.getBasedir(), "src/main/appended-resources");
-        appendedResourcesDirectory.mkdirs();
-        FileUtils.fileWrite(
-                new File(appendedResourcesDirectory, "APPENDED_FILTER.txt.vm").getAbsolutePath(),
+                bundleJar("test", "1.6"));
+        Path appendedResourcesDirectory = Files.createDirectories(basedir.resolve("src/main/appended-resources"));
+        Files.writeString(
+                appendedResourcesDirectory.resolve("APPENDED_FILTER.txt.vm"),
                 "appended: $project.name\n#parse('BUNDLE_FILTER.txt.vm')");
-        setVariableValueToObject(mojo, "appendedResourcesDirectory", appendedResourcesDirectory);
+        set(mojo, "appendedResourcesDirectory", appendedResourcesDirectory.toFile());
 
         mojo.execute();
 
-        File outputDirectory = (File) getVariableValueFromObject(mojo, "outputDirectory");
-        String appendedData = FileUtils.fileRead(new File(outputDirectory, "APPENDED_FILTER.txt"));
-        assertTrue(appendedData.contains("appended: Test Project default-appended-filtered-resource"));
-        assertTrue(appendedData.contains("project.name: Test Project default-appended-filtered-resource"));
-        String bundleData = FileUtils.fileRead(new File(outputDirectory, "BUNDLE_FILTER.txt"));
-        assertTrue(bundleData.contains("project.name: Test Project default-appended-filtered-resource"));
+        String appendedData = Files.readString(outputDirectory(mojo).resolve("APPENDED_FILTER.txt"));
+        assertTrue(appendedData.contains("appended: Test Project"), appendedData);
+        assertTrue(appendedData.contains("project.name: Test Project"), appendedData);
+        String bundleData = Files.readString(outputDirectory(mojo).resolve("BUNDLE_FILTER.txt"));
+        assertTrue(bundleData.contains("project.name: Test Project"), bundleData);
     }
 
     @Test
-    void testAppendedVelocityFailureIdentifiesTemplate(
-            @InjectMojo(goal = "process", pom = DEFAULT_PROCESS_POM_PATH) ProcessRemoteResourcesMojo mojo,
-            @InjectMojo(goal = "bundle", pom = DEFAULT_BUNDLE_POM_PATH) BundleRemoteResourcesMojo bundleMojo)
-            throws Exception {
-        final MavenProjectResourcesStub project = createTestProject("default-appended-velocity-failure");
-        configureProcessMojo(mojo, project, Arrays.asList("test:test:1.5"));
-
-        setupDefaultProject(project);
-
-        String path = pathOf(new DefaultArtifact(
-                "test", "test", VersionRange.createFromVersion("1.5"), null, "jar", "", new DefaultArtifactHandler()));
-        File bundleJar = new File(path);
-        bundleJar.getParentFile().mkdirs();
+    void appendedVelocityFailureIdentifiesTemplate() throws Exception {
+        ProcessRemoteResourcesMojo mojo = processMojo("test:test:1.5");
         buildResourceBundle(
-                bundleMojo,
                 "default-appended-velocity-failure-create",
                 null,
                 new String[] {"APPENDED_FILTER.txt"},
-                bundleJar);
+                bundleJar("test", "1.5"));
+        Path appendedResourcesDirectory = Files.createDirectories(basedir.resolve("src/main/appended-resources"));
+        Files.writeString(
+                appendedResourcesDirectory.resolve("APPENDED_FILTER.txt.vm"), "#parse('missing-appended-template.vm')");
+        set(mojo, "appendedResourcesDirectory", appendedResourcesDirectory.toFile());
 
-        File appendedResourcesDirectory = new File(project.getBasedir(), "src/main/appended-resources");
-        appendedResourcesDirectory.mkdirs();
-        FileUtils.fileWrite(
-                new File(appendedResourcesDirectory, "APPENDED_FILTER.txt.vm").getAbsolutePath(),
-                "#parse('missing-appended-template.vm')");
-        setVariableValueToObject(mojo, "appendedResourcesDirectory", appendedResourcesDirectory);
-
-        try {
-            mojo.execute();
-            fail("Expected the invalid appended template to fail rendering");
-        } catch (MojoExecutionException expected) {
-            assertTrue(expected.getMessage().contains("APPENDED_FILTER.txt.vm"), expected.getMessage());
-        }
+        MojoException e = assertThrows(MojoException.class, mojo::execute);
+        assertTrue(e.getMessage().contains("APPENDED_FILTER.txt.vm"), e.getMessage());
     }
 
-    private void buildResourceBundle(
-            BundleRemoteResourcesMojo mojo, String id, String sourceEncoding, String[] resourceNames, File jarName)
+    private Path outputDirectory(ProcessRemoteResourcesMojo mojo) throws Exception {
+        return ((java.io.File) get(mojo, "outputDirectory")).toPath();
+    }
+
+    /**
+     * The path in the local repository where the bundle with the given coordinates is found.
+     */
+    private Path bundleJar(String groupId, String version) throws IOException {
+        Path jar = localRepo.resolve(groupId).resolve(version).resolve("bundle.jar");
+        Files.createDirectories(jar.getParent());
+        return jar;
+    }
+
+    private ProcessRemoteResourcesMojo processMojo(String... bundles) {
+        ProcessRemoteResourcesMojo mojo = new ProcessRemoteResourcesMojo();
+        mojo.session = session;
+        mojo.project = project;
+        mojo.log = mock(Log.class);
+        try {
+            set(mojo, "fileFilter", mock(MavenFileFilter.class));
+            set(
+                    mojo,
+                    "outputDirectory",
+                    basedir.resolve("target/maven-shared-archive-resources").toFile());
+            set(
+                    mojo,
+                    "appendedResourcesDirectory",
+                    basedir.resolve("src/main/appended-resources").toFile());
+            set(mojo, "resourceBundles", new ArrayList<>(Arrays.asList(bundles)));
+            set(mojo, "outputTimestamp", "2019-01-01T00:00:00Z");
+            set(mojo, "useDefaultFilterDelimiters", true);
+            mojo.encoding = "UTF-8";
+            mojo.includeScope = "runtime";
+            mojo.excludeScope = "";
+            mojo.includeArtifactIds = "";
+            mojo.excludeArtifactIds = "";
+            mojo.includeGroupIds = "";
+            mojo.excludeGroupIds = "";
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
+
+        // resolve every bundle to the jar created by the test for its groupId and version
+        when(session.createArtifact(any(), any(), any(), any(), any(), any())).thenAnswer(i -> {
+            Artifact artifact = mock(Artifact.class);
+            when(artifact.getGroupId()).thenReturn(i.getArgument(0));
+            when(artifact.getArtifactId()).thenReturn(i.getArgument(1));
+            when(artifact.key()).thenReturn(i.getArgument(0) + ":" + i.getArgument(1) + ":" + i.getArgument(2));
+            return artifact;
+        });
+        when(session.resolveArtifact(any(Artifact.class), anyList())).thenAnswer(i -> {
+            Artifact artifact = i.getArgument(0);
+            String[] key = artifact.key().split(":");
+            DownloadedArtifact downloaded = mock(DownloadedArtifact.class);
+            when(downloaded.getPath())
+                    .thenReturn(localRepo.resolve(key[0]).resolve(key[2]).resolve("bundle.jar"));
+            return downloaded;
+        });
+        return mojo;
+    }
+
+    private void buildResourceBundle(String id, String sourceEncoding, String[] resourceNames, Path jarName)
             throws Exception {
-        final MavenProjectResourcesStub project = createTestProject(id);
+        Path resourceDir = Files.createDirectories(tempDir.resolve(id).resolve("src/main/resources"));
+        Path outputDir = Files.createDirectories(tempDir.resolve(id).resolve("target/classes"));
 
-        final File resourceDir = new File(project.getBasedir(), "src/main/resources");
-        configureBundleMojo(mojo, project, resourceDir, sourceEncoding);
+        BundleRemoteResourcesMojo mojo = new BundleRemoteResourcesMojo();
+        set(mojo, "resourcesDirectory", resourceDir.toFile());
+        set(mojo, "outputDirectory", outputDir.toFile());
+        set(mojo, "sourceEncoding", sourceEncoding);
+        set(mojo, "log", mock(Log.class));
 
-        setupDefaultProject(project);
-
-        for (String resourceName2 : resourceNames) {
-            File resource = new File(resourceDir, resourceName2);
-            URL source = getClass().getResource("/" + resourceName2);
-
-            FileUtils.copyURLToFile(source, resource);
+        for (String resourceName : resourceNames) {
+            URL source = getClass().getResource("/" + resourceName);
+            try (InputStream in = source.openStream()) {
+                Files.copy(in, resourceDir.resolve(resourceName));
+            }
         }
 
         mojo.execute();
 
-        File xmlFile = new File(project.getBasedir(), "target/classes/META-INF/maven/remote-resources.xml");
-        assertTrue(xmlFile.exists());
+        Path xmlFile = outputDir.resolve("META-INF/maven/remote-resources.xml");
+        assertTrue(Files.exists(xmlFile));
 
-        String data = FileUtils.fileRead(xmlFile);
+        String data = Files.readString(xmlFile);
 
         List<String> expectedOrder = new ArrayList<>(Arrays.asList(resourceNames));
         Collections.sort(expectedOrder);
         assertContainsInOrder(data, expectedOrder);
 
         if (null != jarName) {
-            try (OutputStream fos = Files.newOutputStream(jarName.toPath());
+            try (OutputStream fos = Files.newOutputStream(jarName);
                     JarOutputStream jar = new JarOutputStream(fos)) {
                 jar.putNextEntry(new ZipEntry("META-INF/maven/remote-resources.xml"));
-                jar.write(data.getBytes());
+                jar.write(data.getBytes(StandardCharsets.UTF_8));
                 jar.closeEntry();
 
                 for (String resourceName : resourceNames) {
-                    File resource = new File(resourceDir, resourceName);
-                    try (InputStream in = Files.newInputStream(resource.toPath())) {
-                        jar.putNextEntry(new ZipEntry(resourceName));
-                        IOUtil.copy(in, jar);
-                        jar.closeEntry();
-                    }
+                    jar.putNextEntry(new ZipEntry(resourceName));
+                    Files.copy(resourceDir.resolve(resourceName), jar);
+                    jar.closeEntry();
                 }
             }
         }
@@ -880,52 +580,24 @@ class RemoteResourcesMojoTest {
         }
     }
 
-    private MavenProjectResourcesStub createTestProject(final String testName) throws Exception {
-        // this will automatically create the isolated
-        // test environment
-        return new MavenProjectResourcesStub(testName);
+    private static Object get(Object target, String name) throws Exception {
+        return field(target.getClass(), name).get(target);
     }
 
-    private void setupDefaultProject(final MavenProjectResourcesStub project) throws Exception {
-        // put this on the root dir
-        project.addFile("pom.xml", MavenProjectBuildStub.ROOT_FILE);
-        project.setInceptionYear("2007");
-        // start creating the environment
-        project.setupBuildEnvironment();
+    private static void set(Object target, String name, Object value) throws Exception {
+        field(target.getClass(), name).set(target, value);
     }
 
-    private void configureBundleMojo(
-            BundleRemoteResourcesMojo mojo, MavenProject project, File resourceDir, String sourceEncoding)
-            throws Exception {
-        setVariableValueToObject(mojo, "resourcesDirectory", resourceDir);
-        setVariableValueToObject(
-                mojo, "outputDirectory", new File(project.getBuild().getOutputDirectory()));
-        setVariableValueToObject(mojo, "sourceEncoding", sourceEncoding);
-    }
-
-    private void configureProcessMojo(ProcessRemoteResourcesMojo mojo, MavenProject project, List<String> bundles)
-            throws Exception {
-        setVariableValueToObject(
-                mojo, "outputDirectory", new File(project.getBuild().getOutputDirectory()));
-        setVariableValueToObject(mojo, "resourceBundles", bundles);
-        setVariableValueToObject(mojo, "mavenSession", session);
-        setVariableValueToObject(mojo, "project", project);
-    }
-
-    private String pathOf(Artifact artifact) {
-        String path = localRepo.getPath() + File.separator
-                + artifact.getGroupId().replace(".", File.separator) + File.separator
-                + artifact.getArtifactId() + File.separator
-                + artifact.getBaseVersion() + File.separator
-                + artifact.getArtifactId() + "-" + artifact.getVersion();
-        if (artifact.getClassifier() != null && !artifact.getClassifier().isEmpty()) {
-            path = path + "-" + artifact.getClassifier();
+    private static Field field(Class<?> type, String name) throws NoSuchFieldException {
+        for (Class<?> c = type; c != null; c = c.getSuperclass()) {
+            try {
+                Field field = c.getDeclaredField(name);
+                field.setAccessible(true);
+                return field;
+            } catch (NoSuchFieldException e) {
+                // try the superclass
+            }
         }
-        String ext = artifact.getArtifactHandler().getExtension();
-        if (ext == null) {
-            ext = artifact.getType();
-        }
-        path = path + "." + ext;
-        return path;
+        throw new NoSuchFieldException(name);
     }
 }

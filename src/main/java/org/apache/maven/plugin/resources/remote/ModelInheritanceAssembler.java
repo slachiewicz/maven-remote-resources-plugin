@@ -23,527 +23,301 @@ import java.util.LinkedHashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
-import java.util.Properties;
-import java.util.TreeMap;
 
-import org.apache.maven.model.Build;
-import org.apache.maven.model.Dependency;
-import org.apache.maven.model.DependencyManagement;
-import org.apache.maven.model.DeploymentRepository;
-import org.apache.maven.model.DistributionManagement;
-import org.apache.maven.model.Extension;
-import org.apache.maven.model.Model;
-import org.apache.maven.model.PluginManagement;
-import org.apache.maven.model.ReportPlugin;
-import org.apache.maven.model.ReportSet;
-import org.apache.maven.model.Reporting;
-import org.apache.maven.model.Resource;
-import org.apache.maven.model.Scm;
-import org.apache.maven.model.Site;
-import org.codehaus.plexus.util.xml.Xpp3Dom;
+import org.apache.maven.api.model.Build;
+import org.apache.maven.api.model.DependencyManagement;
+import org.apache.maven.api.model.DeploymentRepository;
+import org.apache.maven.api.model.DistributionManagement;
+import org.apache.maven.api.model.Model;
+import org.apache.maven.api.model.Repository;
+import org.apache.maven.api.model.Scm;
+import org.apache.maven.api.model.Site;
 
 /**
- * DefaultModelInheritanceAssembler
+ * Assembles a supplemental model (the child) with the model of an artifact (the parent): values of the child win, the
+ * parent fills the gaps. The Maven 4 model is immutable, so the assembled model is returned.
+ * <p>
+ * Plugins, plugin management, extensions and reporting are not merged: the assembled model is only used to render the
+ * descriptive metadata of a dependency in the Velocity templates.
  */
 public class ModelInheritanceAssembler {
-    // TODO Remove this!
-    public void assembleBuildInheritance(Build childBuild, Build parentBuild, boolean handleAsInheritance) {
-        // The build has been set but we want to step in here and fill in
-        // values that have not been set by the child.
 
-        if (childBuild.getSourceDirectory() == null) {
-            childBuild.setSourceDirectory(parentBuild.getSourceDirectory());
-        }
-
-        if (childBuild.getScriptSourceDirectory() == null) {
-            childBuild.setScriptSourceDirectory(parentBuild.getScriptSourceDirectory());
-        }
-
-        if (childBuild.getTestSourceDirectory() == null) {
-            childBuild.setTestSourceDirectory(parentBuild.getTestSourceDirectory());
-        }
-
-        if (childBuild.getOutputDirectory() == null) {
-            childBuild.setOutputDirectory(parentBuild.getOutputDirectory());
-        }
-
-        if (childBuild.getTestOutputDirectory() == null) {
-            childBuild.setTestOutputDirectory(parentBuild.getTestOutputDirectory());
-        }
-
-        // Extensions are accumulated
-        mergeExtensionLists(childBuild, parentBuild);
-
-        if (childBuild.getDirectory() == null) {
-            childBuild.setDirectory(parentBuild.getDirectory());
-        }
-
-        if (childBuild.getDefaultGoal() == null) {
-            childBuild.setDefaultGoal(parentBuild.getDefaultGoal());
-        }
-
-        if (childBuild.getFinalName() == null) {
-            childBuild.setFinalName(parentBuild.getFinalName());
-        }
-
-        ModelUtils.mergeFilterLists(childBuild.getFilters(), parentBuild.getFilters());
-
-        List<Resource> resources = childBuild.getResources();
-        if ((resources == null) || resources.isEmpty()) {
-            childBuild.setResources(parentBuild.getResources());
-        }
-
-        resources = childBuild.getTestResources();
-        if ((resources == null) || resources.isEmpty()) {
-            childBuild.setTestResources(parentBuild.getTestResources());
-        }
-
-        // Plugins are aggregated if Plugin.inherit != false
-        ModelUtils.mergePluginLists(childBuild, parentBuild, handleAsInheritance);
-
-        // Plugin management :: aggregate
-        PluginManagement dominantPM = childBuild.getPluginManagement();
-        PluginManagement recessivePM = parentBuild.getPluginManagement();
-
-        if ((dominantPM == null) && (recessivePM != null)) {
-            // FIXME: Filter out the inherited == false stuff!
-            childBuild.setPluginManagement(recessivePM);
-        } else {
-            ModelUtils.mergePluginLists(childBuild.getPluginManagement(), parentBuild.getPluginManagement(), false);
-        }
+    /**
+     * @param child the dominant model
+     * @param parent the recessive model
+     * @return the child, completed with the values of the parent
+     */
+    public Model assembleModelInheritance(Model child, Model parent) {
+        return assembleModelInheritance(child, parent, null);
     }
 
-    private void assembleScmInheritance(Model child, Model parent, String childPathAdjustment, boolean appendPaths) {
-        if (parent.getScm() != null) {
-            Scm parentScm = parent.getScm();
-
-            Scm childScm = child.getScm();
-
-            if (childScm == null) {
-                childScm = new Scm();
-
-                child.setScm(childScm);
-            }
-
-            if (isEmpty(childScm.getConnection()) && !isEmpty(parentScm.getConnection())) {
-                childScm.setConnection(
-                        appendPath(parentScm.getConnection(), child.getArtifactId(), childPathAdjustment, appendPaths));
-            }
-
-            if (isEmpty(childScm.getDeveloperConnection()) && !isEmpty(parentScm.getDeveloperConnection())) {
-                childScm.setDeveloperConnection(appendPath(
-                        parentScm.getDeveloperConnection(), child.getArtifactId(), childPathAdjustment, appendPaths));
-            }
-
-            if (isEmpty(childScm.getUrl()) && !isEmpty(parentScm.getUrl())) {
-                childScm.setUrl(
-                        appendPath(parentScm.getUrl(), child.getArtifactId(), childPathAdjustment, appendPaths));
-            }
-        }
+    /**
+     * Completes a model with the values of another model that describes the same artifact, so the URLs of the source
+     * are taken as they are and the artifactId of the destination is not appended.
+     *
+     * @param dest the dominant model
+     * @param source the recessive model
+     * @return the destination, completed with the values of the source
+     */
+    public Model copyModel(Model dest, Model source) {
+        return assembleModelInheritance(dest, source, null, false);
     }
 
-    public void copyModel(Model dest, Model source) {
-        assembleModelInheritance(dest, source, null, false);
+    /**
+     * @param child the dominant model
+     * @param parent the recessive model
+     * @param childPathAdjustment the path to append to the URLs of the parent, may be {@code null}
+     * @return the child, completed with the values of the parent
+     */
+    public Model assembleModelInheritance(Model child, Model parent, String childPathAdjustment) {
+        return assembleModelInheritance(child, parent, childPathAdjustment, true);
     }
 
-    public void assembleModelInheritance(Model child, Model parent, String childPathAdjustment) {
-        assembleModelInheritance(child, parent, childPathAdjustment, true);
-    }
-
-    public void assembleModelInheritance(Model child, Model parent) {
-        assembleModelInheritance(child, parent, null, true);
-    }
-
-    private void assembleModelInheritance(Model child, Model parent, String childPathAdjustment, boolean appendPaths) {
+    private Model assembleModelInheritance(Model child, Model parent, String childPathAdjustment, boolean appendPaths) {
         // cannot inherit from null parent.
         if (parent == null) {
-            return;
+            return child;
         }
 
-        // Group id
+        Model.Builder builder = Model.newBuilder(child, true);
+
         if (child.getGroupId() == null) {
-            child.setGroupId(parent.getGroupId());
+            builder.groupId(parent.getGroupId());
         }
 
-        // version
-        if (child.getVersion() == null) {
-            // The parent version may have resolved to something different, so we take what we asked for...
-            // instead of - child.setVersion( parent.getVersion() );
-
-            if (child.getParent() != null) {
-                child.setVersion(child.getParent().getVersion());
-            }
+        // The parent version may have resolved to something different, so we take what we asked for
+        if (child.getVersion() == null && child.getParent() != null) {
+            builder.version(child.getParent().getVersion());
         }
 
-        // inceptionYear
         if (child.getInceptionYear() == null) {
-            child.setInceptionYear(parent.getInceptionYear());
+            builder.inceptionYear(parent.getInceptionYear());
         }
 
-        // url
         if (child.getUrl() == null) {
-            if (parent.getUrl() != null) {
-                child.setUrl(appendPath(parent.getUrl(), child.getArtifactId(), childPathAdjustment, appendPaths));
-            } else {
-                child.setUrl(parent.getUrl());
-            }
+            builder.url(
+                    parent.getUrl() != null
+                            ? appendPath(parent.getUrl(), child.getArtifactId(), childPathAdjustment, appendPaths)
+                            : null);
         }
 
-        assembleDistributionInheritance(child, parent, childPathAdjustment, appendPaths);
+        builder.distributionManagement(assembleDistribution(child, parent, childPathAdjustment, appendPaths));
 
-        // issueManagement
         if (child.getIssueManagement() == null) {
-            child.setIssueManagement(parent.getIssueManagement());
+            builder.issueManagement(parent.getIssueManagement());
         }
 
-        // description
         if (child.getDescription() == null) {
-            child.setDescription(parent.getDescription());
+            builder.description(parent.getDescription());
         }
 
-        // Organization
         if (child.getOrganization() == null) {
-            child.setOrganization(parent.getOrganization());
+            builder.organization(parent.getOrganization());
         }
 
-        // Scm
-        assembleScmInheritance(child, parent, childPathAdjustment, appendPaths);
+        builder.scm(assembleScm(child, parent, childPathAdjustment, appendPaths));
 
-        // ciManagement
         if (child.getCiManagement() == null) {
-            child.setCiManagement(parent.getCiManagement());
+            builder.ciManagement(parent.getCiManagement());
         }
 
-        // developers
-        if (child.getDevelopers().size() == 0) {
-            child.setDevelopers(parent.getDevelopers());
+        if (child.getDevelopers().isEmpty()) {
+            builder.developers(parent.getDevelopers());
         }
 
-        // licenses
-        if (child.getLicenses().size() == 0) {
-            child.setLicenses(parent.getLicenses());
+        if (child.getLicenses().isEmpty()) {
+            builder.licenses(parent.getLicenses());
         }
 
-        // developers
-        if (child.getContributors().size() == 0) {
-            child.setContributors(parent.getContributors());
+        if (child.getContributors().isEmpty()) {
+            builder.contributors(parent.getContributors());
         }
 
-        // mailingLists
-        if (child.getMailingLists().size() == 0) {
-            child.setMailingLists(parent.getMailingLists());
+        if (child.getMailingLists().isEmpty()) {
+            builder.mailingLists(parent.getMailingLists());
         }
 
-        // Build
-        assembleBuildInheritance(child, parent);
+        builder.build(assembleBuild(child.getBuild(), parent.getBuild()));
 
-        assembleDependencyInheritance(child, parent);
+        // dependencies: the ones of the child replace the ones of the parent with the same management key
+        Map<String, org.apache.maven.api.model.Dependency> dependencies = new LinkedHashMap<>();
+        for (org.apache.maven.api.model.Dependency dependency : parent.getDependencies()) {
+            dependencies.put(dependency.getManagementKey(), dependency);
+        }
+        for (org.apache.maven.api.model.Dependency dependency : child.getDependencies()) {
+            dependencies.put(dependency.getManagementKey(), dependency);
+        }
+        builder.dependencies(new ArrayList<>(dependencies.values()));
 
-        child.setRepositories(ModelUtils.mergeRepositoryLists(child.getRepositories(), parent.getRepositories()));
-        //        child.setPluginRepositories(
-        //            ModelUtils.mergeRepositoryLists( child.getPluginRepositories(), parent.getPluginRepositories() )
-        // );
+        builder.repositories(mergeRepositories(child.getRepositories(), parent.getRepositories()));
 
-        assembleReportingInheritance(child, parent);
+        builder.dependencyManagement(assembleDependencyManagement(child, parent));
 
-        assembleDependencyManagementInheritance(child, parent);
+        Map<String, String> properties = new LinkedHashMap<>(parent.getProperties());
+        properties.putAll(child.getProperties());
+        builder.properties(properties);
 
-        Properties props = new Properties();
-        props.putAll(parent.getProperties());
-        props.putAll(child.getProperties());
-
-        child.setProperties(props);
+        return builder.build();
     }
 
-    // TODO Remove this!
-    private void assembleDependencyManagementInheritance(Model child, Model parent) {
-        DependencyManagement parentDepMgmt = parent.getDependencyManagement();
-
-        DependencyManagement childDepMgmt = child.getDependencyManagement();
-
-        if (parentDepMgmt != null) {
-            if (childDepMgmt == null) {
-                child.setDependencyManagement(parentDepMgmt);
-            } else {
-                List<Dependency> childDeps = childDepMgmt.getDependencies();
-
-                Map<String, Dependency> mappedChildDeps = new TreeMap<>();
-                for (Dependency dep : childDeps) {
-                    mappedChildDeps.put(dep.getManagementKey(), dep);
-                }
-
-                for (Dependency dep : parentDepMgmt.getDependencies()) {
-                    if (!mappedChildDeps.containsKey(dep.getManagementKey())) {
-                        childDepMgmt.addDependency(dep);
-                    }
-                }
-            }
+    private static Build assembleBuild(Build child, Build parent) {
+        if (parent == null) {
+            return child;
         }
-    }
-
-    private void assembleReportingInheritance(Model child, Model parent) {
-        // Reports :: aggregate
-        Reporting childReporting = child.getReporting();
-        Reporting parentReporting = parent.getReporting();
-
-        if (parentReporting != null) {
-            if (childReporting == null) {
-                childReporting = new Reporting();
-                child.setReporting(childReporting);
+        Build.Builder builder = child == null ? Build.newBuilder(parent, true) : Build.newBuilder(child, true);
+        if (child != null) {
+            if (child.getSourceDirectory() == null) {
+                builder.sourceDirectory(parent.getSourceDirectory());
             }
-
-            childReporting.setExcludeDefaults(parentReporting.isExcludeDefaults());
-
-            if (isEmpty(childReporting.getOutputDirectory())) {
-                childReporting.setOutputDirectory(parentReporting.getOutputDirectory());
+            if (child.getScriptSourceDirectory() == null) {
+                builder.scriptSourceDirectory(parent.getScriptSourceDirectory());
             }
-
-            mergeReportPluginLists(childReporting, parentReporting, true);
-        }
-    }
-
-    private static void mergeReportPluginLists(Reporting child, Reporting parent, boolean handleAsInheritance) {
-        if ((child == null) || (parent == null)) {
-            // nothing to do.
-            return;
-        }
-
-        List<ReportPlugin> parentPlugins = parent.getPlugins();
-
-        if ((parentPlugins != null) && !parentPlugins.isEmpty()) {
-            Map<String, ReportPlugin> assembledPlugins = new TreeMap<>();
-
-            Map<String, ReportPlugin> childPlugins = child.getReportPluginsAsMap();
-
-            for (ReportPlugin parentPlugin : parentPlugins) {
-                String parentInherited = parentPlugin.getInherited();
-
-                if (!handleAsInheritance || (parentInherited == null) || Boolean.parseBoolean(parentInherited)) {
-
-                    ReportPlugin assembledPlugin = parentPlugin;
-
-                    ReportPlugin childPlugin = childPlugins.get(parentPlugin.getKey());
-
-                    if (childPlugin != null) {
-                        assembledPlugin = childPlugin;
-
-                        mergeReportPluginDefinitions(childPlugin, parentPlugin, handleAsInheritance);
-                    }
-
-                    if (handleAsInheritance && (parentInherited == null)) {
-                        assembledPlugin.unsetInheritanceApplied();
-                    }
-
-                    assembledPlugins.put(assembledPlugin.getKey(), assembledPlugin);
+            if (child.getTestSourceDirectory() == null) {
+                builder.testSourceDirectory(parent.getTestSourceDirectory());
+            }
+            if (child.getOutputDirectory() == null) {
+                builder.outputDirectory(parent.getOutputDirectory());
+            }
+            if (child.getTestOutputDirectory() == null) {
+                builder.testOutputDirectory(parent.getTestOutputDirectory());
+            }
+            if (child.getDirectory() == null) {
+                builder.directory(parent.getDirectory());
+            }
+            if (child.getDefaultGoal() == null) {
+                builder.defaultGoal(parent.getDefaultGoal());
+            }
+            if (child.getFinalName() == null) {
+                builder.finalName(parent.getFinalName());
+            }
+            List<String> filters = new ArrayList<>(child.getFilters());
+            for (String filter : parent.getFilters()) {
+                if (!filters.contains(filter)) {
+                    filters.add(filter);
                 }
             }
-
-            for (ReportPlugin childPlugin : childPlugins.values()) {
-                if (!assembledPlugins.containsKey(childPlugin.getKey())) {
-                    assembledPlugins.put(childPlugin.getKey(), childPlugin);
-                }
+            builder.filters(filters);
+            if (child.getResources().isEmpty()) {
+                builder.resources(parent.getResources());
             }
-
-            child.setPlugins(new ArrayList<>(assembledPlugins.values()));
-
-            child.flushReportPluginMap();
+            if (child.getTestResources().isEmpty()) {
+                builder.testResources(parent.getTestResources());
+            }
         }
+        return builder.build();
     }
 
-    private static void mergeReportSetDefinitions(ReportSet child, ReportSet parent) {
-        List<String> parentReports = parent.getReports();
-        List<String> childReports = child.getReports();
-
-        List<String> reports = new ArrayList<>();
-
-        if ((childReports != null) && !childReports.isEmpty()) {
-            reports.addAll(childReports);
+    private static DependencyManagement assembleDependencyManagement(Model child, Model parent) {
+        DependencyManagement parentManagement = parent.getDependencyManagement();
+        DependencyManagement childManagement = child.getDependencyManagement();
+        if (parentManagement == null) {
+            return childManagement;
         }
-
-        if (parentReports != null) {
-            for (String report : parentReports) {
-                if (!reports.contains(report)) {
-                    reports.add(report);
-                }
-            }
+        if (childManagement == null) {
+            return parentManagement;
         }
-
-        child.setReports(reports);
-
-        Xpp3Dom childConfiguration = (Xpp3Dom) child.getConfiguration();
-        Xpp3Dom parentConfiguration = (Xpp3Dom) parent.getConfiguration();
-
-        childConfiguration = Xpp3Dom.mergeXpp3Dom(childConfiguration, parentConfiguration);
-
-        child.setConfiguration(childConfiguration);
+        Map<String, org.apache.maven.api.model.Dependency> dependencies = new LinkedHashMap<>();
+        for (org.apache.maven.api.model.Dependency dependency : childManagement.getDependencies()) {
+            dependencies.put(dependency.getManagementKey(), dependency);
+        }
+        for (org.apache.maven.api.model.Dependency dependency : parentManagement.getDependencies()) {
+            dependencies.putIfAbsent(dependency.getManagementKey(), dependency);
+        }
+        return DependencyManagement.newBuilder(childManagement, true)
+                .dependencies(new ArrayList<>(dependencies.values()))
+                .build();
     }
 
-    public static void mergeReportPluginDefinitions(
-            ReportPlugin child, ReportPlugin parent, boolean handleAsInheritance) {
-        if ((child == null) || (parent == null)) {
-            // nothing to do.
-            return;
+    private static List<Repository> mergeRepositories(List<Repository> dominant, List<Repository> recessive) {
+        Map<String, Repository> repositories = new LinkedHashMap<>();
+        for (Repository repository : recessive) {
+            repositories.put(repository.getId(), repository);
         }
-
-        if ((child.getVersion() == null) && (parent.getVersion() != null)) {
-            child.setVersion(parent.getVersion());
+        for (Repository repository : dominant) {
+            repositories.put(repository.getId(), repository);
         }
-
-        // from here to the end of the method is dealing with merging of the <executions/> section.
-        String parentInherited = parent.getInherited();
-
-        boolean parentIsInherited = (parentInherited == null) || Boolean.parseBoolean(parentInherited);
-
-        List<ReportSet> parentReportSets = parent.getReportSets();
-
-        if ((parentReportSets != null) && !parentReportSets.isEmpty()) {
-            Map<String, ReportSet> assembledReportSets = new TreeMap<>();
-
-            Map<String, ReportSet> childReportSets = child.getReportSetsAsMap();
-
-            for (ReportSet parentReportSet : parentReportSets) {
-
-                if (!handleAsInheritance || parentIsInherited) {
-                    ReportSet assembledReportSet = parentReportSet;
-
-                    ReportSet childReportSet = childReportSets.get(parentReportSet.getId());
-
-                    if (childReportSet != null) {
-                        mergeReportSetDefinitions(childReportSet, parentReportSet);
-
-                        assembledReportSet = childReportSet;
-                    } else if (handleAsInheritance && (parentInherited == null)) {
-                        parentReportSet.unsetInheritanceApplied();
-                    }
-
-                    assembledReportSets.put(assembledReportSet.getId(), assembledReportSet);
-                }
-            }
-
-            for (Map.Entry<String, ReportSet> entry : childReportSets.entrySet()) {
-                String id = entry.getKey();
-
-                if (!assembledReportSets.containsKey(id)) {
-                    assembledReportSets.put(id, entry.getValue());
-                }
-            }
-
-            child.setReportSets(new ArrayList<>(assembledReportSets.values()));
-
-            child.flushReportSetMap();
-        }
+        return new ArrayList<>(repositories.values());
     }
 
-    // TODO Remove this!
-    private void assembleDependencyInheritance(Model child, Model parent) {
-        Map<String, Dependency> depsMap = new LinkedHashMap<>();
-
-        List<Dependency> deps = parent.getDependencies();
-
-        if (deps != null) {
-            for (Dependency dependency : deps) {
-                depsMap.put(dependency.getManagementKey(), dependency);
-            }
-        }
-
-        deps = child.getDependencies();
-
-        if (deps != null) {
-            for (Dependency dependency : deps) {
-                depsMap.put(dependency.getManagementKey(), dependency);
-            }
-        }
-
-        child.setDependencies(new ArrayList<>(depsMap.values()));
-    }
-
-    private void assembleBuildInheritance(Model child, Model parent) {
-        Build childBuild = child.getBuild();
-        Build parentBuild = parent.getBuild();
-
-        if (parentBuild != null) {
-            if (childBuild == null) {
-                childBuild = new Build();
-                child.setBuild(childBuild);
-            }
-
-            assembleBuildInheritance(childBuild, parentBuild, true);
-        }
-    }
-
-    private void assembleDistributionInheritance(
+    private DistributionManagement assembleDistribution(
             Model child, Model parent, String childPathAdjustment, boolean appendPaths) {
-        if (parent.getDistributionManagement() != null) {
-            DistributionManagement parentDistMgmt = parent.getDistributionManagement();
-
-            DistributionManagement childDistMgmt = child.getDistributionManagement();
-
-            if (childDistMgmt == null) {
-                childDistMgmt = new DistributionManagement();
-
-                child.setDistributionManagement(childDistMgmt);
-            }
-
-            if (childDistMgmt.getSite() == null) {
-                if (parentDistMgmt.getSite() != null) {
-                    Site site = new Site();
-
-                    childDistMgmt.setSite(site);
-
-                    site.setId(parentDistMgmt.getSite().getId());
-
-                    site.setName(parentDistMgmt.getSite().getName());
-
-                    site.setUrl(parentDistMgmt.getSite().getUrl());
-
-                    if (site.getUrl() != null) {
-                        site.setUrl(appendPath(site.getUrl(), child.getArtifactId(), childPathAdjustment, appendPaths));
-                    }
-                }
-            }
-
-            if (childDistMgmt.getRepository() == null) {
-                if (parentDistMgmt.getRepository() != null) {
-                    DeploymentRepository repository = copyDistributionRepository(parentDistMgmt.getRepository());
-                    childDistMgmt.setRepository(repository);
-                }
-            }
-
-            if (childDistMgmt.getSnapshotRepository() == null) {
-                if (parentDistMgmt.getSnapshotRepository() != null) {
-                    DeploymentRepository repository =
-                            copyDistributionRepository(parentDistMgmt.getSnapshotRepository());
-                    childDistMgmt.setSnapshotRepository(repository);
-                }
-            }
-
-            if (isEmpty(childDistMgmt.getDownloadUrl())) {
-                childDistMgmt.setDownloadUrl(parentDistMgmt.getDownloadUrl());
-            }
-
-            // NOTE: We SHOULD NOT be inheriting status, since this is an assessment of the POM quality.
-            // NOTE: We SHOULD NOT be inheriting relocation, since this relates to a single POM
+        DistributionManagement parentManagement = parent.getDistributionManagement();
+        DistributionManagement childManagement = child.getDistributionManagement();
+        if (parentManagement == null) {
+            return childManagement;
         }
+
+        DistributionManagement.Builder builder = childManagement == null
+                ? DistributionManagement.newBuilder(true)
+                : DistributionManagement.newBuilder(childManagement, true);
+        DistributionManagement current =
+                childManagement == null ? DistributionManagement.newBuilder().build() : childManagement;
+
+        if (current.getSite() == null && parentManagement.getSite() != null) {
+            Site site = parentManagement.getSite();
+            Site.Builder siteBuilder =
+                    Site.newBuilder(true).id(site.getId()).name(site.getName()).url(site.getUrl());
+            if (site.getUrl() != null) {
+                siteBuilder.url(appendPath(site.getUrl(), child.getArtifactId(), childPathAdjustment, appendPaths));
+            }
+            builder.site(siteBuilder.build());
+        }
+
+        if (current.getRepository() == null && parentManagement.getRepository() != null) {
+            builder.repository(copyDistributionRepository(parentManagement.getRepository()));
+        }
+
+        if (current.getSnapshotRepository() == null && parentManagement.getSnapshotRepository() != null) {
+            builder.snapshotRepository(copyDistributionRepository(parentManagement.getSnapshotRepository()));
+        }
+
+        if (current.getDownloadUrl() == null || current.getDownloadUrl().isEmpty()) {
+            builder.downloadUrl(parentManagement.getDownloadUrl());
+        }
+
+        // NOTE: We SHOULD NOT be inheriting status, since this is an assessment of the POM quality.
+        // NOTE: We SHOULD NOT be inheriting relocation, since this relates to a single POM
+        return builder.build();
     }
 
     private static DeploymentRepository copyDistributionRepository(DeploymentRepository parentRepository) {
-        DeploymentRepository repository = new DeploymentRepository();
-
-        repository.setId(parentRepository.getId());
-
-        repository.setName(parentRepository.getName());
-
-        repository.setUrl(parentRepository.getUrl());
-
-        repository.setLayout(parentRepository.getLayout());
-
-        repository.setUniqueVersion(parentRepository.isUniqueVersion());
-
-        return repository;
+        return DeploymentRepository.newBuilder(true)
+                .id(parentRepository.getId())
+                .name(parentRepository.getName())
+                .url(parentRepository.getUrl())
+                .layout(parentRepository.getLayout())
+                .uniqueVersion(parentRepository.isUniqueVersion())
+                .build();
     }
 
-    private static boolean isEmpty(String str) {
-        return str == null || str.isEmpty();
+    private Scm assembleScm(Model child, Model parent, String childPathAdjustment, boolean appendPaths) {
+        Scm parentScm = parent.getScm();
+        Scm childScm = child.getScm();
+        if (parentScm == null) {
+            return childScm;
+        }
+
+        Scm.Builder builder = childScm == null ? Scm.newBuilder(true) : Scm.newBuilder(childScm, true);
+        Scm current = childScm == null ? Scm.newBuilder().build() : childScm;
+
+        if (isEmpty(current.getConnection()) && !isEmpty(parentScm.getConnection())) {
+            builder.connection(
+                    appendPath(parentScm.getConnection(), child.getArtifactId(), childPathAdjustment, appendPaths));
+        }
+
+        if (isEmpty(current.getDeveloperConnection()) && !isEmpty(parentScm.getDeveloperConnection())) {
+            builder.developerConnection(appendPath(
+                    parentScm.getDeveloperConnection(), child.getArtifactId(), childPathAdjustment, appendPaths));
+        }
+
+        if (isEmpty(current.getUrl()) && !isEmpty(parentScm.getUrl())) {
+            builder.url(appendPath(parentScm.getUrl(), child.getArtifactId(), childPathAdjustment, appendPaths));
+        }
+        return builder.build();
+    }
+
+    private static boolean isEmpty(String value) {
+        return value == null || value.isEmpty();
     }
 
     // TODO This should eventually be migrated to DefaultPathTranslator.
@@ -619,13 +393,5 @@ public class ModelInheritanceAssembler {
         }
 
         return cleanedPath.toString();
-    }
-
-    private static void mergeExtensionLists(Build childBuild, Build parentBuild) {
-        for (Extension e : parentBuild.getExtensions()) {
-            if (!childBuild.getExtensions().contains(e)) {
-                childBuild.addExtension(e);
-            }
-        }
     }
 }

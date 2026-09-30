@@ -21,23 +21,26 @@ package org.apache.maven.plugin.resources.remote;
 import java.lang.reflect.Field;
 import java.util.Arrays;
 
-import org.apache.maven.model.Dependency;
-import org.apache.maven.model.DependencyManagement;
-import org.apache.maven.model.Model;
-import org.apache.maven.plugin.MojoExecutionException;
-import org.apache.maven.project.MavenProject;
+import org.apache.maven.api.Project;
+import org.apache.maven.api.model.Dependency;
+import org.apache.maven.api.model.DependencyManagement;
+import org.apache.maven.api.model.Model;
+import org.apache.maven.api.plugin.MojoException;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class BundleVersionTest {
 
     @Test
     void versionComesFromDependency() throws Exception {
-        Model model = new Model();
-        model.addDependency(dependency("org.example", "bundle", "1.2"));
+        Model model = Model.newBuilder()
+                .dependencies(Arrays.asList(dependency("org.example", "bundle", "1.2")))
+                .build();
         assertEquals(
                 Arrays.asList("org.example:bundle:1.2"),
                 mojo(model, "org.example:bundle").versionedBundles());
@@ -45,10 +48,11 @@ class BundleVersionTest {
 
     @Test
     void versionComesFromDependencyManagement() throws Exception {
-        Model model = new Model();
-        DependencyManagement management = new DependencyManagement();
-        management.addDependency(dependency("org.example", "bundle", "2.0"));
-        model.setDependencyManagement(management);
+        Model model = Model.newBuilder()
+                .dependencyManagement(DependencyManagement.newBuilder()
+                        .dependencies(Arrays.asList(dependency("org.example", "bundle", "2.0")))
+                        .build())
+                .build();
         assertEquals(
                 Arrays.asList("org.example:bundle:2.0"),
                 mojo(model, "org.example:bundle").versionedBundles());
@@ -58,27 +62,29 @@ class BundleVersionTest {
     void versionedDescriptorsAreKept() throws Exception {
         assertEquals(
                 Arrays.asList("org.example:bundle:1.0:jar"),
-                mojo(new Model(), "org.example:bundle:1.0:jar").versionedBundles());
+                mojo(Model.newBuilder().build(), "org.example:bundle:1.0:jar").versionedBundles());
     }
 
     @Test
     void missingVersionFails() throws Exception {
-        AbstractProcessRemoteResourcesMojo mojo = mojo(new Model(), "org.example:bundle");
-        MojoExecutionException e = assertThrows(MojoExecutionException.class, mojo::versionedBundles);
+        AbstractProcessRemoteResourcesMojo mojo = mojo(Model.newBuilder().build(), "org.example:bundle");
+        MojoException e = assertThrows(MojoException.class, mojo::versionedBundles);
         assertTrue(e.getMessage().contains("has no version"), e.getMessage());
     }
 
     private static Dependency dependency(String groupId, String artifactId, String version) {
-        Dependency dependency = new Dependency();
-        dependency.setGroupId(groupId);
-        dependency.setArtifactId(artifactId);
-        dependency.setVersion(version);
-        return dependency;
+        return Dependency.newBuilder()
+                .groupId(groupId)
+                .artifactId(artifactId)
+                .version(version)
+                .build();
     }
 
     private static AbstractProcessRemoteResourcesMojo mojo(Model model, String... bundles) throws Exception {
-        AbstractProcessRemoteResourcesMojo mojo = new ProcessRemoteResourcesMojo(null, null, null, null, null);
-        set(mojo, "project", new MavenProject(model));
+        AbstractProcessRemoteResourcesMojo mojo = new ProcessRemoteResourcesMojo();
+        Project project = mock(Project.class);
+        when(project.getModel()).thenReturn(model);
+        mojo.project = project;
         set(mojo, "resourceBundles", Arrays.asList(bundles));
         return mojo;
     }

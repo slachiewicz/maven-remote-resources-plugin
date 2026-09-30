@@ -18,9 +18,11 @@
  */
 package org.apache.maven.plugin.resources.remote;
 
-import org.apache.maven.model.License;
-import org.apache.maven.model.Model;
-import org.apache.maven.model.Scm;
+import java.util.List;
+
+import org.apache.maven.api.model.License;
+import org.apache.maven.api.model.Model;
+import org.apache.maven.api.model.Scm;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -29,22 +31,20 @@ class SupplementMergeTest {
 
     @Test
     void supplementKeepsTheDependencyUrls() {
-        Model pom = new Model();
-        pom.setGroupId("org.foo");
-        pom.setArtifactId("widget");
-        pom.setUrl("https://widget.example.org/site");
-        Scm scm = new Scm();
-        scm.setUrl("https://github.com/example/widget");
-        pom.setScm(scm);
+        Model pom = Model.newBuilder()
+                .groupId("org.foo")
+                .artifactId("widget")
+                .url("https://widget.example.org/site")
+                .scm(Scm.newBuilder().url("https://github.com/example/widget").build())
+                .build();
 
-        Model supplement = new Model();
-        supplement.setGroupId("org.foo");
-        supplement.setArtifactId("widget");
-        License license = new License();
-        license.setName("MIT License");
-        supplement.addLicense(license);
+        Model supplement = Model.newBuilder()
+                .groupId("org.foo")
+                .artifactId("widget")
+                .licenses(List.of(License.newBuilder().name("MIT License").build()))
+                .build();
 
-        Model merged = new ProcessRemoteResourcesMojo(null, null, null, null, null).mergeModels(pom, supplement);
+        Model merged = new ProcessRemoteResourcesMojo().mergeModels(pom, supplement);
 
         assertEquals("https://widget.example.org/site", merged.getUrl());
         assertEquals("https://github.com/example/widget", merged.getScm().getUrl());
