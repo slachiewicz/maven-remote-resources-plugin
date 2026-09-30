@@ -19,7 +19,6 @@
 package org.apache.maven.plugin.resources.remote;
 
 import java.io.File;
-import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.IOException;
 import java.io.InputStream;
@@ -32,6 +31,9 @@ import java.net.MalformedURLException;
 import java.net.URL;
 import java.nio.charset.Charset;
 import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -41,41 +43,48 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.Enumeration;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Properties;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.stream.Collectors;
 
-import org.apache.maven.RepositoryUtils;
-import org.apache.maven.archiver.MavenArchiver;
-import org.apache.maven.artifact.Artifact;
-import org.apache.maven.artifact.handler.manager.ArtifactHandlerManager;
-import org.apache.maven.execution.MavenSession;
-import org.apache.maven.model.Model;
-import org.apache.maven.model.Organization;
-import org.apache.maven.model.Resource;
-import org.apache.maven.model.building.ModelBuildingRequest;
-import org.apache.maven.model.io.xpp3.MavenXpp3Reader;
-import org.apache.maven.plugin.AbstractMojo;
-import org.apache.maven.plugin.MojoExecutionException;
+import org.apache.maven.api.Artifact;
+import org.apache.maven.api.Dependency;
+import org.apache.maven.api.Language;
+import org.apache.maven.api.Node;
+import org.apache.maven.api.PathScope;
+import org.apache.maven.api.Project;
+import org.apache.maven.api.ProjectScope;
+import org.apache.maven.api.RemoteRepository;
+import org.apache.maven.api.Session;
+import org.apache.maven.api.SourceRoot;
+import org.apache.maven.api.Type;
+import org.apache.maven.api.di.Inject;
+import org.apache.maven.api.model.Model;
+import org.apache.maven.api.model.Organization;
+import org.apache.maven.api.plugin.Log;
+import org.apache.maven.api.plugin.MojoException;
+import org.apache.maven.api.plugin.annotations.Parameter;
+import org.apache.maven.api.services.MavenException;
+import org.apache.maven.api.services.ModelBuilder;
+import org.apache.maven.api.services.ModelBuilderRequest;
+import org.apache.maven.api.services.ModelBuilderResult;
+import org.apache.maven.api.services.ProjectManager;
+import org.apache.maven.api.services.Sources;
+import org.apache.maven.api.services.xml.ModelXmlFactory;
+import org.apache.maven.api.services.xml.XmlReaderRequest;
 import org.apache.maven.plugin.resources.remote.io.xpp3.RemoteResourcesBundleXpp3Reader;
 import org.apache.maven.plugin.resources.remote.io.xpp3.SupplementalDataModelXpp3Reader;
-import org.apache.maven.plugins.annotations.Parameter;
-import org.apache.maven.project.DefaultProjectBuildingRequest;
-import org.apache.maven.project.MavenProject;
-import org.apache.maven.project.ProjectBuilder;
-import org.apache.maven.project.ProjectBuildingException;
-import org.apache.maven.project.ProjectBuildingRequest;
-import org.apache.maven.project.ProjectBuildingResult;
+import org.apache.maven.shared.archiver.MavenArchiver;
 import org.apache.maven.shared.artifact.filter.collection.ArtifactFilterException;
 import org.apache.maven.shared.artifact.filter.collection.ArtifactIdFilter;
 import org.apache.maven.shared.artifact.filter.collection.FilterArtifacts;
 import org.apache.maven.shared.artifact.filter.collection.GroupIdFilter;
 import org.apache.maven.shared.artifact.filter.collection.ProjectTransitivityFilter;
 import org.apache.maven.shared.artifact.filter.collection.ScopeFilter;
-import org.apache.maven.shared.filtering.FilteringUtils;
 import org.apache.maven.shared.filtering.MavenFileFilter;
 import org.apache.maven.shared.filtering.MavenFileFilterRequest;
 import org.apache.maven.shared.filtering.MavenFilteringException;
@@ -87,21 +96,17 @@ import org.apache.velocity.exception.ParseErrorException;
 import org.apache.velocity.exception.ResourceNotFoundException;
 import org.apache.velocity.exception.VelocityException;
 import org.apache.velocity.runtime.resource.loader.ClasspathResourceLoader;
+import org.codehaus.plexus.resource.DefaultResourceManager;
 import org.codehaus.plexus.resource.ResourceManager;
 import org.codehaus.plexus.resource.loader.FileResourceLoader;
-import org.codehaus.plexus.util.FileUtils;
-import org.codehaus.plexus.util.IOUtil;
+import org.codehaus.plexus.resource.loader.JarResourceLoader;
+import org.codehaus.plexus.resource.loader.ResourceLoader;
+import org.codehaus.plexus.resource.loader.ThreadContextClasspathResourceLoader;
+import org.codehaus.plexus.resource.loader.URLResourceLoader;
 import org.codehaus.plexus.util.StringUtils;
 import org.codehaus.plexus.util.io.CachingOutputStream;
 import org.codehaus.plexus.util.xml.Xpp3Dom;
 import org.codehaus.plexus.util.xml.pull.XmlPullParserException;
-import org.eclipse.aether.RepositorySystem;
-import org.eclipse.aether.artifact.ArtifactType;
-import org.eclipse.aether.artifact.DefaultArtifact;
-import org.eclipse.aether.resolution.ArtifactRequest;
-import org.eclipse.aether.resolution.ArtifactResolutionException;
-import org.eclipse.aether.resolution.ArtifactResult;
-import org.eclipse.aether.util.artifact.JavaScopes;
 
 /**
  * <p>
@@ -118,7 +123,7 @@ import org.eclipse.aether.util.artifact.JavaScopes;
  * This is a support abstract class, with two non-aggregating and aggregating implementations.
  * </p>
  */
-public abstract class AbstractProcessRemoteResourcesMojo extends AbstractMojo {
+public abstract class AbstractProcessRemoteResourcesMojo implements org.apache.maven.api.plugin.Mojo {
     private static final String TEMPLATE_SUFFIX = ".vm";
 
     /**
@@ -166,7 +171,7 @@ public abstract class AbstractProcessRemoteResourcesMojo extends AbstractMojo {
     /**
      * The directory containing extra information appended to the generated resources.
      */
-    @Parameter(defaultValue = "${basedir}/src/main/appended-resources")
+    @Parameter(defaultValue = "${project.basedir}/src/main/appended-resources")
     private File appendedResourcesDirectory;
 
     /**
@@ -224,15 +229,13 @@ public abstract class AbstractProcessRemoteResourcesMojo extends AbstractMojo {
     /**
      * Additional properties to be passed to Velocity.
      * Several properties are automatically added:<ul>
-     * <li><code>project</code> - the current MavenProject </li>
-     * <li><code>projects</code> - the list of dependency projects</li>
+     * <li><code>project</code> - the current project, a {@link RemoteResourcesProject}</li>
+     * <li><code>projects</code> - the list of dependency projects, each one a {@link RemoteResourcesProject}</li>
      * <li><code>projectsSortedByOrganization</code> - the list of dependency projects sorted by organization</li>
      * <li><code>projectTimespan</code> - the timespan of the current project (requires inceptionYear in pom)</li>
      * <li><code>locator</code> - the ResourceManager that can be used to retrieve additional resources</li>
      * </ul>
-     * See <a
-     * href="https://maven.apache.org/ref/current/maven-project/apidocs/org/apache/maven/project/MavenProject.html"> the
-     * javadoc for MavenProject</a> for information about the properties on the MavenProject.
+     * See {@link RemoteResourcesProject} for information about the properties of a project.
      */
     @Parameter
     protected Map<String, String> properties = new HashMap<>();
@@ -262,14 +265,17 @@ public abstract class AbstractProcessRemoteResourcesMojo extends AbstractMojo {
     /**
      * The Maven session.
      */
-    @Parameter(defaultValue = "${session}", readonly = true, required = true)
-    protected MavenSession mavenSession;
+    @Inject
+    protected Session session;
 
     /**
      * The current project.
      */
-    @Parameter(defaultValue = "${project}", readonly = true, required = true)
-    protected MavenProject project;
+    @Inject
+    protected Project project;
+
+    @Inject
+    protected Log log;
 
     /**
      * Scope to include. An Empty string indicates all scopes (default is "runtime").
@@ -367,48 +373,39 @@ public abstract class AbstractProcessRemoteResourcesMojo extends AbstractMojo {
 
     private VelocityEngine velocity;
 
-    protected final RepositorySystem repoSystem;
-
     /**
      * Filtering support, for local resources that override those in the remote bundle.
      */
-    private final MavenFileFilter fileFilter;
+    @Inject
+    private MavenFileFilter fileFilter;
 
     private final ResourceManager locator;
 
-    private final ProjectBuilder projectBuilder;
-
-    private final ArtifactHandlerManager artifactHandlerManager;
-
-    protected AbstractProcessRemoteResourcesMojo(
-            RepositorySystem repoSystem,
-            MavenFileFilter fileFilter,
-            ResourceManager locator,
-            ProjectBuilder projectBuilder,
-            ArtifactHandlerManager artifactHandlerManager) {
-        this.repoSystem = repoSystem;
-        this.fileFilter = fileFilter;
-        this.locator = locator;
-        this.projectBuilder = projectBuilder;
-        this.artifactHandlerManager = artifactHandlerManager;
+    protected AbstractProcessRemoteResourcesMojo() {
+        Map<String, ResourceLoader> loaders = new LinkedHashMap<>();
+        loaders.put(FileResourceLoader.ID, new FileResourceLoader());
+        loaders.put("jar", new JarResourceLoader());
+        loaders.put("url", new URLResourceLoader());
+        loaders.put("classloader", new ThreadContextClasspathResourceLoader());
+        this.locator = new DefaultResourceManager(loaders);
     }
 
     @Override
-    public void execute() throws MojoExecutionException {
+    public void execute() throws MojoException {
         if (skip) {
-            getLog().info("Skipping remote resources execution.");
+            log.info("Skipping remote resources execution.");
             return;
         }
 
         if (encoding == null || encoding.isEmpty()) {
-            getLog().warn("File encoding has not been set, using platform encoding " + Charset.defaultCharset()
+            log.warn("File encoding has not been set, using platform encoding " + Charset.defaultCharset()
                     + ", i.e. build is platform dependent!");
             encoding = Charset.defaultCharset().name();
         }
 
         if (resolveScopes == null) {
             resolveScopes = new String[] {
-                (this.includeScope == null || this.includeScope.isEmpty()) ? JavaScopes.TEST : this.includeScope
+                (this.includeScope == null || this.includeScope.isEmpty()) ? "test" : this.includeScope
             };
         }
 
@@ -419,7 +416,7 @@ public abstract class AbstractProcessRemoteResourcesMojo extends AbstractMojo {
                     supplementalModels = new String[] {sups.toURI().toURL().toString()};
                 } catch (MalformedURLException e) {
                     // ignore
-                    getLog().debug("URL issue with supplemental-models.xml: " + e);
+                    log.debug("URL issue with supplemental-models.xml: " + e);
                 }
             }
         }
@@ -447,28 +444,29 @@ public abstract class AbstractProcessRemoteResourcesMojo extends AbstractMojo {
 
             if (outputDirectory.exists()) {
                 // ----------------------------------------------------------------------------
-                // Push our newly generated resources directory into the MavenProject so that
+                // Push our newly generated resources directory into the project so that
                 // these resources can be picked up by the process-resources phase.
                 // ----------------------------------------------------------------------------
-                Resource resource = new Resource();
-                resource.setDirectory(outputDirectory.getAbsolutePath());
                 // MRRESOURCES-61 handle main and test resources separately
+                ProjectManager projectManager = session.getService(ProjectManager.class);
                 if (attachToMain) {
-                    project.getResources().add(resource);
+                    projectManager.addSourceRoot(
+                            project, ProjectScope.MAIN, Language.RESOURCES, outputDirectory.toPath());
                 }
                 if (attachToTest) {
-                    project.getTestResources().add(resource);
+                    projectManager.addSourceRoot(
+                            project, ProjectScope.TEST, Language.RESOURCES, outputDirectory.toPath());
                 }
 
                 // ----------------------------------------------------------------------------
                 // Write out archiver dot file
                 // ----------------------------------------------------------------------------
                 try {
-                    File dotFile = new File(project.getBuild().getDirectory(), ".plxarc");
-                    FileUtils.mkdir(dotFile.getParentFile().getAbsolutePath());
-                    FileUtils.fileWrite(dotFile.getAbsolutePath(), outputDirectory.getName());
+                    Path dotFile = Path.of(project.getBuild().getDirectory(), ".plxarc");
+                    Files.createDirectories(dotFile.getParent());
+                    Files.writeString(dotFile, outputDirectory.getName());
                 } catch (IOException e) {
-                    throw new MojoExecutionException("Error creating dot file for archiving instructions.", e);
+                    throw new MojoException("Error creating dot file for archiving instructions.", e);
                 }
             }
         } finally {
@@ -476,7 +474,7 @@ public abstract class AbstractProcessRemoteResourcesMojo extends AbstractMojo {
         }
     }
 
-    private void configureLocator() throws MojoExecutionException {
+    private void configureLocator() throws MojoException {
         if (supplementalModelArtifacts != null && !supplementalModelArtifacts.isEmpty()) {
             List<File> artifacts = downloadBundles(supplementalModelArtifacts);
 
@@ -486,34 +484,37 @@ public abstract class AbstractProcessRemoteResourcesMojo extends AbstractMojo {
                 } else {
                     try {
                         locator.addSearchPath(
-                                "jar", "jar:" + artifact.toURI().toURL().toExternalForm());
+                                JarResourceLoader.ID,
+                                "jar:" + artifact.toURI().toURL().toExternalForm());
                     } catch (MalformedURLException e) {
-                        throw new MojoExecutionException("Could not use jar " + artifact.getAbsolutePath(), e);
+                        throw new MojoException("Could not use jar " + artifact.getAbsolutePath(), e);
                     }
                 }
             }
         }
 
-        File projectFile = project.getFile();
+        Path projectFile = project.getPomPath();
         if (projectFile == null) {
-            throw new MojoExecutionException(
-                    "The current project has no POM file; cannot configure the resource locator.");
+            throw new MojoException("The current project has no POM file; cannot configure the resource locator.");
         }
-        locator.addSearchPath(FileResourceLoader.ID, projectFile.getParentFile().getAbsolutePath());
+        locator.addSearchPath(
+                FileResourceLoader.ID, projectFile.getParent().toAbsolutePath().toString());
         if (appendedResourcesDirectory != null) {
             locator.addSearchPath(FileResourceLoader.ID, appendedResourcesDirectory.getAbsolutePath());
         }
-        locator.addSearchPath("url", "");
+        locator.addSearchPath(URLResourceLoader.ID, "");
         locator.setOutputDirectory(new File(project.getBuild().getDirectory()));
     }
 
-    protected List<MavenProject> getProjects() {
-        List<MavenProject> projects = new ArrayList<>();
+    protected List<RemoteResourcesProject> getProjects() {
+        List<RemoteResourcesProject> projects = new ArrayList<>();
+        ProjectManager projectManager = session.getService(ProjectManager.class);
+        List<RemoteRepository> repositories = projectManager.getRemoteProjectRepositories(project);
 
         // add filters in well known order, least specific to most specific
         FilterArtifacts filter = new FilterArtifacts();
 
-        Set<Artifact> artifacts = new LinkedHashSet<>(getAllDependencies());
+        Set<Dependency> artifacts = new LinkedHashSet<>(getAllDependencies());
         if (this.excludeTransitive) {
             filter.addFilter(new ProjectTransitivityFilter(getDirectDependencies(), true));
         }
@@ -529,46 +530,56 @@ public abstract class AbstractProcessRemoteResourcesMojo extends AbstractMojo {
             throw new IllegalStateException(e.getMessage(), e);
         }
 
-        getLog().debug("PROJECTS: " + artifacts);
+        log.debug("PROJECTS: " + artifacts);
 
-        for (Artifact artifact : artifacts) {
-            if (artifact.isSnapshot()) {
-                artifact.setVersion(artifact.getBaseVersion());
-            }
+        for (Dependency dependency : artifacts) {
+            // the POM of a snapshot is located by its base version
+            Artifact artifact = session.createArtifact(
+                    dependency.getGroupId(),
+                    dependency.getArtifactId(),
+                    dependency.getBaseVersion().toString(),
+                    null,
+                    "pom",
+                    "pom");
 
-            getLog().debug("Building project for " + artifact);
-            MavenProject p;
+            log.debug("Building project for " + artifact);
+            Model model;
             try {
-                ProjectBuildingRequest req = new DefaultProjectBuildingRequest()
-                        .setValidationLevel(ModelBuildingRequest.VALIDATION_LEVEL_MINIMAL)
-                        .setProcessPlugins(false)
-                        .setRepositorySession(mavenSession.getRepositorySession())
-                        .setSystemProperties(mavenSession.getSystemProperties())
-                        .setUserProperties(mavenSession.getUserProperties())
-                        .setLocalRepository(mavenSession.getLocalRepository())
-                        .setRemoteRepositories(project.getRemoteArtifactRepositories());
-                ProjectBuildingResult res = projectBuilder.build(artifact, req);
-                p = res.getProject();
-            } catch (ProjectBuildingException e) {
-                getLog().warn("Invalid project model for artifact [" + artifact.getGroupId() + ":"
-                        + artifact.getArtifactId() + ":" + artifact.getVersion() + "]. "
+                Path pom = session.resolveArtifact(artifact, repositories).getPath();
+                // ProjectBuilder only returns projects that have a base directory, which a POM located in a
+                // repository does not have: the effective model is requested from the ModelBuilder instead
+                ModelBuilderResult result = session.getService(ModelBuilder.class)
+                        .newSession()
+                        .build(ModelBuilderRequest.builder()
+                                .session(session)
+                                .requestType(ModelBuilderRequest.RequestType.CONSUMER_DEPENDENCY)
+                                .source(Sources.resolvedSource(pom, artifact.key()))
+                                .repositories(repositories)
+                                .build());
+                model = result.getEffectiveModel();
+            } catch (MavenException e) {
+                log.debug("Cannot build the project of " + artifact, e);
+                model = null;
+            }
+            if (model == null) {
+                log.warn("Invalid project model for artifact [" + dependency.getGroupId() + ":"
+                        + dependency.getArtifactId() + ":" + dependency.getBaseVersion() + "]. "
                         + "It will be ignored by the remote resources Mojo.");
                 continue;
             }
 
-            String supplementKey = generateSupplementMapKey(
-                    p.getModel().getGroupId(), p.getModel().getArtifactId());
+            String supplementKey = generateSupplementMapKey(model.getGroupId(), model.getArtifactId());
 
             if (supplementModels.containsKey(supplementKey)) {
-                Model mergedModel = mergeModels(p.getModel(), supplementModels.get(supplementKey));
-                MavenProject mergedProject = new MavenProject(mergedModel);
-                projects.add(mergedProject);
-                mergedProject.setArtifact(artifact);
-                mergedProject.setVersion(artifact.getVersion());
-                getLog().debug("Adding project with groupId [" + mergedProject.getGroupId() + "] (supplemented)");
+                Model mergedModel = mergeModels(model, supplementModels.get(supplementKey));
+                mergedModel = Model.newBuilder(mergedModel, true)
+                        .version(dependency.getBaseVersion().toString())
+                        .build();
+                projects.add(new RemoteResourcesProject(mergedModel, dependency, null));
+                log.debug("Adding project with groupId [" + mergedModel.getGroupId() + "] (supplemented)");
             } else {
-                projects.add(p);
-                getLog().debug("Adding project with groupId [" + p.getGroupId() + "]");
+                projects.add(new RemoteResourcesProject(model, dependency, null));
+                log.debug("Adding project with groupId [" + model.getGroupId() + "]");
             }
         }
         projects.sort(new ProjectComparator());
@@ -576,36 +587,62 @@ public abstract class AbstractProcessRemoteResourcesMojo extends AbstractMojo {
     }
 
     /**
+     * Returns the resolved dependencies of a project, including all the transitive ones.
+     */
+    protected Map<String, Dependency> getAllDependencies(Project project) {
+        Map<String, Dependency> result = new LinkedHashMap<>();
+        Node root = session.collectDependencies(project, PathScope.TEST_RUNTIME);
+        for (Node node : session.flattenDependencies(root, PathScope.TEST_RUNTIME)) {
+            // the root node is the project itself
+            if (node.getDependency() != null) {
+                result.putIfAbsent(node.getDependency().key(), node.getDependency());
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Returns the direct dependencies of a project.
+     */
+    protected Map<String, Dependency> getDirectDependencies(Project project) {
+        Map<String, Dependency> result = new LinkedHashMap<>();
+        Node root = session.collectDependencies(project, PathScope.TEST_RUNTIME);
+        for (Node node : root.getChildren()) {
+            if (node.getDependency() != null) {
+                result.putIfAbsent(node.getDependency().key(), node.getDependency());
+            }
+        }
+        return result;
+    }
+
+    /**
      * Returns all the transitive hull of all the involved maven projects.
      */
-    protected abstract Set<Artifact> getAllDependencies();
+    protected abstract Set<Dependency> getAllDependencies();
 
     /**
      * Returns all the direct dependencies of all the involved maven projects.
      */
-    protected abstract Set<Artifact> getDirectDependencies();
+    protected abstract Set<Dependency> getDirectDependencies();
 
-    protected Map<Organization, List<MavenProject>> getProjectsSortedByOrganization(List<MavenProject> projects) {
-        Map<Organization, List<MavenProject>> organizations = new TreeMap<>(new OrganizationComparator());
-        List<MavenProject> unknownOrganization = new ArrayList<>();
+    protected Map<Organization, List<RemoteResourcesProject>> getProjectsSortedByOrganization(
+            List<RemoteResourcesProject> projects) {
+        Map<Organization, List<RemoteResourcesProject>> organizations = new TreeMap<>(new OrganizationComparator());
+        List<RemoteResourcesProject> unknownOrganization = new ArrayList<>();
 
-        for (MavenProject p : projects) {
+        for (RemoteResourcesProject p : projects) {
             if (p.getOrganization() != null
                     && StringUtils.isNotEmpty(p.getOrganization().getName())) {
-                List<MavenProject> sortedProjects = organizations.get(p.getOrganization());
-                if (sortedProjects == null) {
-                    sortedProjects = new ArrayList<>();
-                }
-                sortedProjects.add(p);
-
-                organizations.put(p.getOrganization(), sortedProjects);
+                organizations
+                        .computeIfAbsent(p.getOrganization(), k -> new ArrayList<>())
+                        .add(p);
             } else {
                 unknownOrganization.add(p);
             }
         }
         if (!unknownOrganization.isEmpty()) {
-            Organization unknownOrg = new Organization();
-            unknownOrg.setName("an unknown organization");
+            Organization unknownOrg =
+                    Organization.newBuilder().name("an unknown organization").build();
             organizations.put(unknownOrg, unknownOrganization);
         }
 
@@ -614,9 +651,13 @@ public abstract class AbstractProcessRemoteResourcesMojo extends AbstractMojo {
 
     protected boolean copyResourceIfExists(
             File outputFile, String bundleResourceName, VelocityContext context, String encoding)
-            throws IOException, MojoExecutionException {
-        for (Resource resource : project.getResources()) {
-            File resourceDirectory = new File(resource.getDirectory());
+            throws IOException, MojoException {
+        ProjectManager projectManager = session.getService(ProjectManager.class);
+        List<SourceRoot> resources = projectManager
+                .getEnabledSourceRoots(project, ProjectScope.MAIN, Language.RESOURCES)
+                .collect(Collectors.toList());
+        for (SourceRoot resource : resources) {
+            File resourceDirectory = resource.directory().toFile();
 
             if (!resourceDirectory.exists()) {
                 continue;
@@ -632,32 +673,31 @@ public abstract class AbstractProcessRemoteResourcesMojo extends AbstractMojo {
 
             if (source.exists() && !source.equals(outputFile)) {
                 if (source == templateSource) {
-                    getLog().debug("Use project resource '" + source + "' as resource with Velocity");
+                    log.debug("Use project resource '" + source + "' as resource with Velocity");
                     try (CachingOutputStream os = new CachingOutputStream(outputFile);
                             Writer writer = getWriter(encoding, os);
                             Reader reader = getReader(encoding, source)) {
                         velocity.evaluate(context, writer, "", reader);
                     } catch (ParseErrorException | MethodInvocationException | ResourceNotFoundException e) {
-                        throw new MojoExecutionException("Error rendering velocity resource: " + source, e);
+                        throw new MojoException("Error rendering velocity resource: " + source, e);
                     }
-                } else if (resource.isFiltering()) {
-                    getLog().debug("Use project resource '" + source + "' as resource with filtering");
+                } else if (resource.stringFiltering()) {
+                    log.debug("Use project resource '" + source + "' as resource with filtering");
 
-                    MavenFileFilterRequest req = setupRequest(resource, source, outputFile);
+                    MavenFileFilterRequest req = setupRequest(source, outputFile);
 
                     try {
                         fileFilter.copyFile(req);
                     } catch (MavenFilteringException e) {
-                        throw new MojoExecutionException("Error filtering resource: " + source, e);
+                        throw new MojoException("Error filtering resource: " + source, e);
                     }
                 } else {
-                    getLog().debug("Use project resource '" + source + "' as resource");
-                    FilteringUtils.copyFile(source, outputFile, null, null);
+                    log.debug("Use project resource '" + source + "' as resource");
+                    Files.copy(source.toPath(), outputFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
                 }
 
-                // exclude the original (so eclipse doesn't complain about duplicate resources)
-                resource.addExclude(bundleResourceName);
-
+                // NOTE: the project resource can no longer be excluded from the resources of the project, the
+                // source roots are immutable.
                 return true;
             }
         }
@@ -669,10 +709,10 @@ public abstract class AbstractProcessRemoteResourcesMojo extends AbstractMojo {
             return false;
         }
 
-        File source = new File(project.getBasedir(), bundleResourceName);
+        File source = new File(project.getBasedir().toFile(), bundleResourceName);
         if (source.exists()) {
-            getLog().debug("Use project file '" + source + "' as resource");
-            FilteringUtils.copyFile(source, outputFile, null, null);
+            log.debug("Use project file '" + source + "' as resource");
+            Files.copy(source.toPath(), outputFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
             return true;
         }
 
@@ -688,16 +728,15 @@ public abstract class AbstractProcessRemoteResourcesMojo extends AbstractMojo {
         return new OutputStreamWriter(outputStream, writerEncoding != null ? writerEncoding : encoding);
     }
 
-    private MavenFileFilterRequest setupRequest(Resource resource, File source, File file) {
+    private MavenFileFilterRequest setupRequest(File source, File file) {
         MavenFileFilterRequest req = new MavenFileFilterRequest();
-        req.setFrom(source);
-        req.setTo(file);
-        req.setFiltering(resource.isFiltering());
+        req.setFrom(source.toPath());
+        req.setTo(file.toPath());
+        req.setFiltering(true);
 
         req.setMavenProject(project);
-        req.setMavenSession(mavenSession);
+        req.setMavenSession(session);
         req.setInjectProjectBuildFilters(true);
-
         req.setEncoding(encoding);
 
         if (filterDelimiters != null && !filterDelimiters.isEmpty()) {
@@ -720,7 +759,7 @@ public abstract class AbstractProcessRemoteResourcesMojo extends AbstractMojo {
         return req;
     }
 
-    protected void validate() throws MojoExecutionException {
+    protected void validate() throws MojoException {
         int bundleCount = 1;
 
         for (String artifactDescriptor : resourceBundles) {
@@ -741,7 +780,7 @@ public abstract class AbstractProcessRemoteResourcesMojo extends AbstractMojo {
                     position = bundleCount + "th";
                 }
 
-                throw new MojoExecutionException("The " + position
+                throw new MojoException("The " + position
                         + " resource bundle configured must specify a groupId, artifactId, "
                         + " version and, optionally, type and classifier for a remote resource bundle. "
                         + "Must be of the form <resourceBundle>groupId:artifactId:version</resourceBundle>, "
@@ -761,10 +800,7 @@ public abstract class AbstractProcessRemoteResourcesMojo extends AbstractMojo {
         Map<String, Object> contextProperties = new HashMap<>(properties);
 
         if (includeProjectProperties) {
-            final Properties projectProperties = project.getProperties();
-            for (String key : projectProperties.stringPropertyNames()) {
-                contextProperties.put(key, projectProperties.getProperty(key));
-            }
+            contextProperties.putAll(session.getService(ProjectManager.class).getProperties(project));
         }
 
         // the following properties are expensive to calculate, so we provide them lazily
@@ -774,7 +810,7 @@ public abstract class AbstractProcessRemoteResourcesMojo extends AbstractMojo {
                 Object result = super.internalGet(key);
                 if (result == null && key != null && key.startsWith(KEY_PROJECTS) && containsKey(key)) {
                     // calculate and put projects* properties
-                    List<MavenProject> projects = getProjects();
+                    List<RemoteResourcesProject> projects = getProjects();
                     put(KEY_PROJECTS, projects);
                     put(KEY_PROJECTS_ORGS, getProjectsSortedByOrganization(projects));
                     return super.internalGet(key);
@@ -787,7 +823,7 @@ public abstract class AbstractProcessRemoteResourcesMojo extends AbstractMojo {
         context.put(KEY_PROJECTS_ORGS, null);
         // the following properties are cheap to calculate, so we provide them eagerly
 
-        String inceptionYear = project.getInceptionYear();
+        String inceptionYear = project.getModel().getInceptionYear();
 
         // Reproducible Builds: try to use reproducible output timestamp
         String year = MavenArchiver.parseBuildOutputTimestamp(outputTimestamp)
@@ -796,13 +832,13 @@ public abstract class AbstractProcessRemoteResourcesMojo extends AbstractMojo {
                 .format(DateTimeFormatter.ofPattern("yyyy"));
 
         if (inceptionYear == null || inceptionYear.isEmpty()) {
-            if (getLog().isDebugEnabled()) {
-                getLog().debug("inceptionYear not specified, defaulting to " + year);
+            if (log.isDebugEnabled()) {
+                log.debug("inceptionYear not specified, defaulting to " + year);
             }
 
             inceptionYear = year;
         }
-        context.put("project", project);
+        context.put("project", new RemoteResourcesProject(project.getModel(), null, project.getBasedir()));
         context.put("presentYear", year);
         context.put("locator", locator);
 
@@ -814,24 +850,26 @@ public abstract class AbstractProcessRemoteResourcesMojo extends AbstractMojo {
         return context;
     }
 
-    private List<File> downloadBundles(List<String> bundles) throws MojoExecutionException {
+    private List<File> downloadBundles(List<String> bundles) throws MojoException {
         List<File> bundleArtifacts = new ArrayList<>();
+        ProjectManager projectManager = session.getService(ProjectManager.class);
 
         for (String artifactDescriptor : bundles) {
-            getLog().info("Preparing remote bundle " + artifactDescriptor);
+            log.info("Preparing remote bundle " + artifactDescriptor);
             // groupId:artifactId:version[:type[:classifier]]
             String[] s = artifactDescriptor.split(":");
 
             File artifactFile = null;
             // check if the artifact is part of the reactor
-            if (mavenSession != null) {
-                List<MavenProject> list = mavenSession.getProjects();
-                for (MavenProject p : list) {
+            if (session != null) {
+                for (Project p : session.getProjects()) {
                     if (s[0].equals(p.getGroupId()) && s[1].equals(p.getArtifactId()) && s[2].equals(p.getVersion())) {
                         if (s.length >= 4 && "test-jar".equals(s[3])) {
-                            artifactFile = new File(p.getBuild().getTestOutputDirectory());
+                            artifactFile =
+                                    p.getOutputDirectory(ProjectScope.TEST).toFile();
                         } else {
-                            artifactFile = new File(p.getBuild().getOutputDirectory());
+                            artifactFile =
+                                    p.getOutputDirectory(ProjectScope.MAIN).toFile();
                         }
                     }
                 }
@@ -840,21 +878,19 @@ public abstract class AbstractProcessRemoteResourcesMojo extends AbstractMojo {
                 String g = s[0];
                 String a = s[1];
                 String v = s[2];
-                String type = s.length >= 4 ? s[3] : "jar";
-                ArtifactType artifactType =
-                        RepositoryUtils.newArtifactType(type, artifactHandlerManager.getArtifactHandler(type));
-                String classifier = s.length == 5 ? s[4] : artifactType.getClassifier();
+                String typeId = s.length >= 4 ? s[3] : "jar";
+                Type type = session.requireType(typeId);
+                String classifier = s.length == 5 ? s[4] : type.getClassifier();
 
-                DefaultArtifact artifact =
-                        new DefaultArtifact(g, a, classifier, artifactType.getExtension(), v, artifactType);
+                Artifact artifact = session.createArtifact(g, a, v, classifier, type.getExtension(), typeId);
 
                 try {
-                    ArtifactRequest request =
-                            new ArtifactRequest(artifact, project.getRemoteProjectRepositories(), "remote-resources");
-                    ArtifactResult result = repoSystem.resolveArtifact(mavenSession.getRepositorySession(), request);
-                    artifactFile = result.getArtifact().getFile();
-                } catch (ArtifactResolutionException e) {
-                    throw new MojoExecutionException("Error processing remote resources", e);
+                    artifactFile = session.resolveArtifact(
+                                    artifact, projectManager.getRemoteProjectRepositories(project))
+                            .getPath()
+                            .toFile();
+                } catch (MavenException e) {
+                    throw new MojoException("Error processing remote resources", e);
                 }
             }
             bundleArtifacts.add(artifactFile);
@@ -863,7 +899,7 @@ public abstract class AbstractProcessRemoteResourcesMojo extends AbstractMojo {
         return bundleArtifacts;
     }
 
-    private ClassLoader initalizeClassloader(List<File> artifacts) throws MojoExecutionException {
+    private ClassLoader initalizeClassloader(List<File> artifacts) throws MojoException {
         RemoteResourcesClassLoader cl = new RemoteResourcesClassLoader(null);
         try {
             for (File artifact : artifacts) {
@@ -871,12 +907,11 @@ public abstract class AbstractProcessRemoteResourcesMojo extends AbstractMojo {
             }
             return cl;
         } catch (MalformedURLException e) {
-            throw new MojoExecutionException("Unable to configure resources classloader: " + e.getMessage(), e);
+            throw new MojoException("Unable to configure resources classloader: " + e.getMessage(), e);
         }
     }
 
-    protected void processResourceBundles(ClassLoader classLoader, VelocityContext context)
-            throws MojoExecutionException {
+    protected void processResourceBundles(ClassLoader classLoader, VelocityContext context) throws MojoException {
         List<Map.Entry<String, RemoteResourcesBundle>> remoteResources = new ArrayList<>();
         int bundleCount = 0;
         int resourceCount = 0;
@@ -889,7 +924,7 @@ public abstract class AbstractProcessRemoteResourcesMojo extends AbstractMojo {
                     e.hasMoreElements(); ) {
                 URL url = e.nextElement();
                 bundleCount++;
-                getLog().debug("processResourceBundle on bundle#" + bundleCount + " " + url);
+                log.debug("processResourceBundle on bundle#" + bundleCount + " " + url);
 
                 RemoteResourcesBundle bundle;
 
@@ -903,18 +938,18 @@ public abstract class AbstractProcessRemoteResourcesMojo extends AbstractMojo {
                 for (String bundleResource : bundle.getRemoteResources()) {
                     n++;
                     resourceCount++;
-                    getLog().debug("bundle#" + bundleCount + " resource#" + n + " " + bundleResource);
+                    log.debug("bundle#" + bundleCount + " resource#" + n + " " + bundleResource);
                     remoteResources.add(new AbstractMap.SimpleEntry<>(bundleResource, bundle));
                 }
             }
         } catch (IOException ioe) {
-            throw new MojoExecutionException("Error finding remote resources manifests", ioe);
+            throw new MojoException("Error finding remote resources manifests", ioe);
         } catch (XmlPullParserException xppe) {
-            throw new MojoExecutionException("Error parsing remote resource bundle descriptor.", xppe);
+            throw new MojoException("Error parsing remote resource bundle descriptor.", xppe);
         }
 
-        getLog().info("Copying " + resourceCount + " resource" + ((resourceCount > 1) ? "s" : "") + " from "
-                + bundleCount + " bundle" + ((bundleCount > 1) ? "s" : "") + ".");
+        log.info("Copying " + resourceCount + " resource" + ((resourceCount > 1) ? "s" : "") + " from " + bundleCount
+                + " bundle" + ((bundleCount > 1) ? "s" : "") + ".");
 
         String velocityResource = null;
         try {
@@ -936,7 +971,7 @@ public abstract class AbstractProcessRemoteResourcesMojo extends AbstractMojo {
 
                 File outputFile = new File(outputDirectory, projectResource);
 
-                FileUtils.mkdir(outputFile.getParentFile().getAbsolutePath());
+                Files.createDirectories(outputFile.getParentFile().toPath());
 
                 // resource exists in project resources
                 if (copyResourceIfExists(outputFile, projectResource, context, bundle.getSourceEncoding())) {
@@ -960,7 +995,9 @@ public abstract class AbstractProcessRemoteResourcesMojo extends AbstractMojo {
                 } else {
                     URL bundleResourceUrl = classLoader.getResource(bundleResource);
                     if (bundleResourceUrl != null) {
-                        FileUtils.copyURLToFile(bundleResourceUrl, outputFile);
+                        try (InputStream in = bundleResourceUrl.openStream()) {
+                            Files.copy(in, outputFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
+                        }
                     }
                 }
 
@@ -968,14 +1005,15 @@ public abstract class AbstractProcessRemoteResourcesMojo extends AbstractMojo {
                 File appendedVmResourceFile = new File(appendedResourcesDirectory, projectResource + ".vm");
 
                 if (appendedResourceFile.exists()) {
-                    getLog().info("Copying appended resource: " + projectResource);
+                    log.info("Copying appended resource: " + projectResource);
                     try (InputStream in = Files.newInputStream(appendedResourceFile.toPath());
-                            OutputStream out = new FileOutputStream(outputFile, true)) {
-                        IOUtil.copy(in, out);
+                            OutputStream out = Files.newOutputStream(
+                                    outputFile.toPath(), StandardOpenOption.CREATE, StandardOpenOption.APPEND)) {
+                        in.transferTo(out);
                     }
 
                 } else if (appendedVmResourceFile.exists()) {
-                    getLog().info("Filtering appended resource: " + projectResource + ".vm");
+                    log.info("Filtering appended resource: " + projectResource + ".vm");
 
                     try (CachingOutputStream os = new CachingOutputStream(outputFile);
                             Reader reader = getReader(bundle.getSourceEncoding(), appendedVmResourceFile);
@@ -986,95 +1024,94 @@ public abstract class AbstractProcessRemoteResourcesMojo extends AbstractMojo {
                 }
             }
         } catch (IOException ioe) {
-            throw new MojoExecutionException("Error reading remote resource", ioe);
+            throw new MojoException("Error reading remote resource", ioe);
         } catch (VelocityException e) {
-            throw new MojoExecutionException("Error rendering Velocity resource '" + velocityResource + "'", e);
+            throw new MojoException("Error rendering Velocity resource '" + velocityResource + "'", e);
         }
     }
 
-    private void verifyRequiredProperties(RemoteResourcesBundle bundle, URL url) throws MojoExecutionException {
+    private void verifyRequiredProperties(RemoteResourcesBundle bundle, URL url) throws MojoException {
         if (bundle.getRequiredProjectProperties() == null
                 || bundle.getRequiredProjectProperties().isEmpty()) {
             return;
         }
 
         for (String requiredProperty : bundle.getRequiredProjectProperties()) {
-            if (!project.getProperties().containsKey(requiredProperty)) {
-                throw new MojoExecutionException(
+            if (!session.getService(ProjectManager.class).getProperties(project).containsKey(requiredProperty)) {
+                throw new MojoException(
                         "Required project property: '" + requiredProperty + "' is not present for bundle: " + url);
             }
         }
     }
 
-    protected Model getSupplement(Xpp3Dom supplementModelXml) throws MojoExecutionException {
-        MavenXpp3Reader modelReader = new MavenXpp3Reader();
+    protected Model getSupplement(Xpp3Dom supplementModelXml) throws MojoException {
         Model model = null;
 
         try {
-            model = modelReader.read(new StringReader(supplementModelXml.toString()));
+            model = session.getService(ModelXmlFactory.class)
+                    .read(XmlReaderRequest.builder()
+                            .reader(new StringReader(supplementModelXml.toString()))
+                            .strict(false)
+                            .build());
             String groupId = model.getGroupId();
             String artifactId = model.getArtifactId();
 
             if (groupId == null || groupId.trim().isEmpty()) {
-                throw new MojoExecutionException(
-                        "Supplemental project XML " + "requires that a <groupId> element be present.");
+                throw new MojoException("Supplemental project XML " + "requires that a <groupId> element be present.");
             }
 
             if (artifactId == null || artifactId.trim().isEmpty()) {
-                throw new MojoExecutionException(
+                throw new MojoException(
                         "Supplemental project XML " + "requires that a <artifactId> element be present.");
             }
-        } catch (IOException e) {
-            getLog().warn("Unable to read supplemental XML: " + e.getMessage(), e);
-        } catch (XmlPullParserException e) {
-            getLog().warn("Unable to parse supplemental XML: " + e.getMessage(), e);
+        } catch (MavenException e) {
+            log.warn("Unable to read supplemental XML: " + e.getMessage(), e);
         }
 
         return model;
     }
 
     protected Model mergeModels(Model parent, Model child) {
-        inheritanceAssembler.assembleModelInheritance(child, parent);
-        return child;
+        return inheritanceAssembler.assembleModelInheritance(child, parent);
     }
 
     private static String generateSupplementMapKey(String groupId, String artifactId) {
         return groupId.trim() + ":" + artifactId.trim();
     }
 
-    private Map<String, Model> loadSupplements(String[] models) throws MojoExecutionException {
+    private Map<String, Model> loadSupplements(String[] models) throws MojoException {
         if (models == null) {
-            getLog().debug("Supplemental data models won't be loaded. No models specified.");
+            log.debug("Supplemental data models won't be loaded. No models specified.");
             return Collections.emptyMap();
         }
 
         List<Supplement> supplements = new ArrayList<>();
         for (String set : models) {
-            getLog().debug("Preparing ruleset: " + set);
+            log.debug("Preparing ruleset: " + set);
             try {
                 File f = locator.getResourceAsFile(set, getLocationTemp(set));
 
                 if (null == f || !f.exists()) {
-                    throw new MojoExecutionException("Cold not resolve " + set);
+                    throw new MojoException("Cold not resolve " + set);
                 }
                 if (!f.canRead()) {
-                    throw new MojoExecutionException("Supplemental data models won't be loaded. " + "File "
-                            + f.getAbsolutePath() + " cannot be read, check permissions on the file.");
+                    throw new MojoException("Supplemental data models won't be loaded. " + "File " + f.getAbsolutePath()
+                            + " cannot be read, check permissions on the file.");
                 }
 
-                getLog().debug("Loading supplemental models from " + f.getAbsolutePath());
+                log.debug("Loading supplemental models from " + f.getAbsolutePath());
 
                 SupplementalDataModelXpp3Reader reader = new SupplementalDataModelXpp3Reader();
                 SupplementalDataModel supplementalModel = reader.read(new FileReader(f));
                 supplements.addAll(supplementalModel.getSupplement());
             } catch (Exception e) {
                 String msg = "Error loading supplemental data models: " + e.getMessage();
-                getLog().error(msg, e);
-                throw new MojoExecutionException(msg, e);
+                log.error(msg, e);
+                throw new MojoException(msg, e);
             }
         }
 
-        getLog().debug("Loading supplements complete.");
+        log.debug("Loading supplements complete.");
 
         Map<String, Model> supplementMap = new HashMap<>();
         for (Supplement sd : supplements) {
@@ -1101,7 +1138,7 @@ public abstract class AbstractProcessRemoteResourcesMojo extends AbstractMojo {
         if (loc.indexOf('\\') != -1) {
             loc = loc.substring(loc.lastIndexOf('\\') + 1);
         }
-        getLog().debug("Before: " + name + " After: " + loc);
+        log.debug("Before: " + name + " After: " + loc);
         return loc;
     }
 
@@ -1128,10 +1165,17 @@ public abstract class AbstractProcessRemoteResourcesMojo extends AbstractMojo {
         }
     }
 
-    static class ProjectComparator implements Comparator<MavenProject> {
+    static class ProjectComparator implements Comparator<RemoteResourcesProject> {
         @Override
-        public int compare(MavenProject p1, MavenProject p2) {
-            return p1.getArtifact().compareTo(p2.getArtifact());
+        public int compare(RemoteResourcesProject p1, RemoteResourcesProject p2) {
+            int i = p1.getGroupId().compareTo(p2.getGroupId());
+            if (i == 0) {
+                i = p1.getArtifactId().compareTo(p2.getArtifactId());
+            }
+            if (i == 0) {
+                i = p1.getVersion().compareTo(p2.getVersion());
+            }
+            return i;
         }
     }
 }

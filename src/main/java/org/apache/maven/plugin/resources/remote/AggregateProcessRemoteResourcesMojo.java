@@ -18,21 +18,14 @@
  */
 package org.apache.maven.plugin.resources.remote;
 
-import javax.inject.Inject;
-
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.Map;
 import java.util.Set;
 
-import org.apache.maven.artifact.Artifact;
-import org.apache.maven.artifact.handler.manager.ArtifactHandlerManager;
-import org.apache.maven.plugins.annotations.LifecyclePhase;
-import org.apache.maven.plugins.annotations.Mojo;
-import org.apache.maven.plugins.annotations.ResolutionScope;
-import org.apache.maven.project.MavenProject;
-import org.apache.maven.project.ProjectBuilder;
-import org.apache.maven.shared.filtering.MavenFileFilter;
-import org.codehaus.plexus.resource.ResourceManager;
-import org.eclipse.aether.RepositorySystem;
+import org.apache.maven.api.Dependency;
+import org.apache.maven.api.Project;
+import org.apache.maven.api.plugin.annotations.Mojo;
 
 /**
  * <p>
@@ -46,39 +39,24 @@ import org.eclipse.aether.RepositorySystem;
  * </p>
  * Resources that don't end in ".vm" are copied "as is".
  */
-@Mojo(
-        name = "aggregate",
-        defaultPhase = LifecyclePhase.GENERATE_RESOURCES,
-        aggregator = true,
-        requiresDependencyResolution = ResolutionScope.TEST,
-        threadSafe = true)
+@Mojo(name = "aggregate", defaultPhase = "generate-resources", aggregator = true)
 public class AggregateProcessRemoteResourcesMojo extends AbstractProcessRemoteResourcesMojo {
 
-    @Inject
-    public AggregateProcessRemoteResourcesMojo(
-            RepositorySystem repoSystem,
-            MavenFileFilter fileFilter,
-            ResourceManager locator,
-            ProjectBuilder projectBuilder,
-            ArtifactHandlerManager artifactHandlerManager) {
-        super(repoSystem, fileFilter, locator, projectBuilder, artifactHandlerManager);
+    @Override
+    protected Set<Dependency> getAllDependencies() {
+        Map<String, Dependency> result = new LinkedHashMap<>();
+        for (Project mavenProject : session.getProjects()) {
+            getAllDependencies(mavenProject).forEach(result::putIfAbsent);
+        }
+        return new LinkedHashSet<>(result.values());
     }
 
     @Override
-    protected Set<Artifact> getAllDependencies() {
-        LinkedHashSet<Artifact> result = new LinkedHashSet<>();
-        for (MavenProject mavenProject : mavenSession.getProjects()) {
-            result.addAll(mavenProject.getArtifacts());
+    protected Set<Dependency> getDirectDependencies() {
+        Map<String, Dependency> result = new LinkedHashMap<>();
+        for (Project mavenProject : session.getProjects()) {
+            getDirectDependencies(mavenProject).forEach(result::putIfAbsent);
         }
-        return result;
-    }
-
-    @Override
-    protected Set<Artifact> getDirectDependencies() {
-        LinkedHashSet<Artifact> result = new LinkedHashSet<>();
-        for (MavenProject mavenProject : mavenSession.getProjects()) {
-            result.addAll(mavenProject.getDependencyArtifacts());
-        }
-        return result;
+        return new LinkedHashSet<>(result.values());
     }
 }
